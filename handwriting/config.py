@@ -17,6 +17,8 @@ class Settings:
     )
     max_upload_bytes: int = 15 * 1024 * 1024
     max_image_pixels: int = 20_000_000
+    # JPEGs decode at reduced scale, so camera originals cost far less memory.
+    max_jpeg_pixels: int = 64_000_000
     max_image_side: int = 2400
     max_pending_jobs: int = 20
     max_data_bytes: int = field(

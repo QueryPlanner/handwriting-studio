@@ -26,10 +26,18 @@ def decode_image(data: bytes, settings: Settings) -> Image.Image:
                 # Some camera JPEGs carry an auxiliary gain/depth frame. Trace
                 # the primary photograph instead of rejecting its MPO label.
                 source.seek(0)
-                if source.width * source.height > settings.max_image_pixels:
-                    raise ImageError("The decoded image exceeds the 20 megapixel limit.")
+                is_jpeg = source.format in {"JPEG", "MPO"}
+                limit = settings.max_jpeg_pixels if is_jpeg else settings.max_image_pixels
+                if source.width * source.height > limit:
+                    raise ImageError(
+                        f"The decoded image exceeds the {limit / 1_000_000:g} megapixel limit."
+                    )
                 if source.width < 32 or source.height < 32:
                     raise ImageError("The image must be at least 32 pixels in each dimension.")
+                if is_jpeg:
+                    # The decoder scales by 1/2, 1/4 or 1/8 while reading, never below
+                    # the requested size, so a 24 megapixel photo does not need 72 MB.
+                    source.draft("RGB", (settings.max_image_side, settings.max_image_side))
                 image = ImageOps.exif_transpose(source).convert("RGBA")
                 white = Image.new("RGBA", image.size, "white")
                 white.alpha_composite(image)

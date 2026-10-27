@@ -272,3 +272,23 @@ def test_weight_offset_preserves_a_small_enclosed_counter():
     assert balanced[30, 30] == 0
     assert np.count_nonzero(balanced) > 0
     assert topology(np.zeros((10, 10), dtype=np.uint8)) == (0, 0)
+
+
+def _jpeg(size):
+    output = io.BytesIO()
+    Image.new("RGB", size, (250, 250, 245)).save(output, format="JPEG")
+    return output.getvalue()
+
+
+def test_large_camera_jpeg_decodes_at_reduced_scale():
+    settings = Settings(max_image_pixels=10_000, max_jpeg_pixels=400_000, max_image_side=200)
+    # 600x400 is over the PNG limit but under the JPEG limit; draft decoding shrinks it.
+    image = decode_image(_jpeg((600, 400)), settings)
+    assert max(image.size) <= 300
+    assert image.size[0] / image.size[1] == pytest.approx(1.5, abs=0.02)
+
+
+def test_jpeg_above_its_own_limit_is_rejected_with_that_limit():
+    settings = Settings(max_image_pixels=1_000_000, max_jpeg_pixels=40_000)
+    with pytest.raises(ImageError, match="0.04 megapixel"):
+        decode_image(_jpeg((300, 200)), settings)

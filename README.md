@@ -118,7 +118,7 @@ Configure allowed frontend origins through `CORS_ORIGINS`. The default is `http:
 
 ## Conversion process and limits
 
-1. Validate actual image bytes, correct EXIF rotation, flatten transparency onto white, and resize to at most 2,400 pixels per side. The upload limit is 15 MiB and the decoded limit is 20 megapixels. JPEG, PNG, and WebP are supported. Multi-picture camera JPEGs identified as MPO use their primary photograph; auxiliary gain or depth frames are ignored.
+1. Validate actual image bytes, correct EXIF rotation, flatten transparency onto white, and resize to at most 2,400 pixels per side. The upload limit is 15 MiB and the decoded limit is 64 megapixels for JPEG (decoded at reduced scale) and 20 megapixels for PNG and WebP. JPEG, PNG, and WebP are supported. Multi-picture camera JPEGs identified as MPO use their primary photograph; auxiliary gain or depth frames are ignored.
 2. Separate blue ink by color. In automatic mode, include strong dark strokes under shadows. Dark mode uses local contrast. Remove tiny isolated marks. Apply page-background heuristics only when proposing crops, so reviewed edge crops retain their ink.
 3. Estimate row slope, group disconnected marks, and assign the supplied labels in reading order. Return count errors for correction.
 4. Preserve crop aspect ratio. Estimate lowercase height, capitals, ascenders, descenders, and punctuation placement from the label. Overrides allow corrections.
