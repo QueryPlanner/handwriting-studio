@@ -17,3 +17,5 @@ jobs:
       - run: node --check handwriting/static/studio.js
       - run: node --check handwriting/static/theme.js
       - run: node scripts/build-site.mjs
+      - name: Validate the gateway configuration
+        run: docker run --rm --add-host api:127.0.0.1 -v "$PWD/deploy/nginx.conf:/etc/nginx/nginx.conf:ro" nginx:1.28-alpine nginx -t
