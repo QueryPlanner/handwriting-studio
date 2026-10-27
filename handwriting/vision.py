@@ -1,8 +1,9 @@
-"""Locate and label handwritten characters with a vision model through OpenRouter.
+"""Read the characters on a handwriting sheet with a vision model through OpenRouter.
 
-The model proposes a label and a rough box for every character it can see. Boxes are
-untrusted: they are validated here and snapped to the traced ink in `imaging`, and the
-studio still lets a person correct them before a font is generated.
+The model only transcribes: one line of text per row of handwriting, in reading order.
+It returns no coordinates, which keeps the answer to a few hundred tokens. The shapes
+come from the ink itself in `imaging`, and the studio still lets a person correct them
+before a font is generated.
 """
 
 import base64
@@ -15,65 +16,33 @@ import urllib.request
 from collections.abc import Callable
 
 from PIL import Image
-from pydantic import ValidationError
 
 from handwriting.config import Settings
-from handwriting.models import DEFAULT_ROWS, GlyphBox
+from handwriting.models import DEFAULT_ROWS
 
 logger = logging.getLogger(__name__)
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 MAX_GLYPHS = 160
-SCALE = 1000  # The model reports integer coordinates on a 0-1000 grid.
 
 PROMPT = (
     "This photograph shows handwriting where each character was written separately, such "
     "as an alphabet sheet. The writer may have added extra letters, digits, punctuation or "
-    "symbols (for example the rupee sign ₹), and may have used lined paper. List every "
-    "handwritten character you can see in reading order, one entry per character. Give "
-    "the character itself and a tight bounding box as integers on a 0-1000 scale: x0, y0 "
-    "is the top-left corner and x1, y1 the bottom-right, relative to the image width and "
-    "height. The box must include every stroke of that character, such as the dots of i "
-    "and j and the tails of g, j, p, q and y. Use the surrounding characters to decide "
-    "between look-alikes, for example a rupee sign among symbols. Ignore printed text, "
-    "ruled lines, page edges and faint writing showing through from the other side. "
-    "Many sheets follow this template, one line per row: "
+    "symbols (for example the rupee sign ₹), and may have used lined paper. Transcribe "
+    "every handwritten character in reading order. Answer with plain text only: one line "
+    "per visual row of handwriting, the characters of a row joined with no spaces or "
+    "separators, and nothing else. Include every mark, even an odd or repeated one. "
+    "Ignore printed text, ruled lines, page edges and faint writing showing through from "
+    "the other side. Many sheets follow this template, one line per row: "
     + " | ".join(DEFAULT_ROWS)
     + ". Use it to resolve sloppy marks, for example a hurried ? or !, only where the "
     "writing really follows it. Report what is written, including extra or missing "
     "characters, and never invent a character that is not on the page."
 )
 
-SCHEMA = {
-    "name": "handwritten_characters",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["glyphs"],
-        "properties": {
-            "glyphs": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["character", "x0", "y0", "x1", "y1"],
-                    "properties": {
-                        "character": {"type": "string"},
-                        "x0": {"type": "integer"},
-                        "y0": {"type": "integer"},
-                        "x1": {"type": "integer"},
-                        "y1": {"type": "integer"},
-                    },
-                },
-            }
-        },
-    },
-}
-
 
 class VisionError(RuntimeError):
-    """The vision service could not provide usable character boxes."""
+    """The vision service could not provide a usable transcription."""
 
 
 Transport = Callable[[dict, str, float], dict]
@@ -103,53 +72,57 @@ def encode_image(image: Image.Image, max_side: int) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode()
 
 
-def parse_glyphs(response: dict) -> list[dict]:
+def parse_rows(response: dict) -> list[str]:
     try:
         content = response["choices"][0]["message"]["content"]
-        entries = json.loads(content)["glyphs"]
-        if not isinstance(entries, list):
-            raise TypeError("glyphs is not a list")
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        if not isinstance(content, str):
+            raise TypeError("the answer has no text")
+    except (KeyError, IndexError, TypeError) as exc:
+        # A reasoning model can spend its whole budget thinking and return no text.
         raise VisionError("The vision service returned an unreadable answer.") from exc
-    boxes = []
-    for entry in entries[:MAX_GLYPHS]:
-        try:
-            x0, y0, x1, y1 = (min(max(int(entry[k]), 0), SCALE) for k in ("x0", "y0", "x1", "y1"))
-            character = entry["character"]
-            if len(character) != 1 or unicodedata.normalize("NFC", character) != character:
-                raise ValueError("one composed character per box")
-            boxes.append(
-                GlyphBox(
-                    character=character,
-                    x=x0 / SCALE,
-                    y=y0 / SCALE,
-                    width=(x1 - x0) / SCALE,
-                    height=(y1 - y0) / SCALE,
-                ).model_dump()
-            )
-        except (KeyError, TypeError, ValueError, ValidationError):
-            logger.info("Skipped an unusable vision box.")
-    if not boxes:
+    rows = []
+    for line in content.replace("```", "").splitlines():
+        # Drop whitespace the model adds between characters, and any unusable character.
+        kept = "".join(
+            c
+            for c in unicodedata.normalize("NFC", line)
+            if not c.isspace() and not unicodedata.category(c).startswith("C")
+        )
+        if kept:
+            rows.append(kept)
+    total = sum(map(len, rows))
+    if not total:
         raise VisionError("The vision service did not find any characters.")
-    return boxes
+    if total > MAX_GLYPHS:
+        raise VisionError(f"The vision service reported more than {MAX_GLYPHS} characters.")
+    return rows
 
 
 class VisionLocator:
-    """Callable that turns a photograph into proposed glyph boxes."""
+    """Callable that transcribes a photograph into rows of characters.
+
+    `attempt` 0 uses the configured reasoning effort. A retry uses the higher one,
+    because a retry means the first answer disagreed with the ink on the page.
+    """
 
     def __init__(self, settings: Settings, transport: Transport = post_json):
         if not settings.openrouter_api_key:
             raise VisionError("OPENROUTER_API_KEY is not configured.")
         self.settings, self.transport = settings, transport
 
-    def __call__(self, image: Image.Image) -> list[dict]:
+    def __call__(self, image: Image.Image, attempt: int = 0) -> list[str]:
+        effort = (
+            self.settings.vision_reasoning_effort
+            if attempt == 0
+            else self.settings.vision_retry_effort
+        )
         body = {
             "model": self.settings.vision_model,
-            "max_tokens": 8000,
-            "reasoning": {"effort": self.settings.vision_reasoning_effort},
-            # Handwriting photos are personal. Ask OpenRouter to avoid providers that train on them.
-            "provider": {"data_collection": "deny"},
-            "response_format": {"type": "json_schema", "json_schema": SCHEMA},
+            "max_tokens": 4000,
+            "reasoning": {"effort": effort},
+            # Handwriting photos are personal. Ask OpenRouter to avoid providers that train
+            # on them, and to pick the fastest one that qualifies.
+            "provider": {"data_collection": "deny", "sort": "throughput"},
             "messages": [
                 {
                     "role": "user",
@@ -168,4 +141,4 @@ class VisionLocator:
         response = self.transport(
             body, self.settings.openrouter_api_key, self.settings.vision_timeout_seconds
         )
-        return parse_glyphs(response)
+        return parse_rows(response)

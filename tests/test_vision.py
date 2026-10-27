@@ -14,21 +14,19 @@ from handwriting.api import create_app
 from handwriting.config import Settings
 from handwriting.imaging import (
     ImageError,
-    align_labels,
+    align_order,
+    align_rows,
     analyze,
+    drop_stray_ends,
     layout_groups,
-    rows_from_boxes,
+    pair_cost,
 )
-from handwriting.vision import VisionError, VisionLocator, encode_image, parse_glyphs, post_json
+from handwriting.vision import VisionError, VisionLocator, encode_image, parse_rows, post_json
 from tests.conftest import wait_job
 
 
-def answer(glyphs):
-    return {"choices": [{"message": {"content": json.dumps({"glyphs": glyphs})}}]}
-
-
-def entry(character="a", x0=100, y0=200, x1=300, y1=400):
-    return {"character": character, "x0": x0, "y0": y0, "x1": x1, "y1": y1}
+def answer(text):
+    return {"choices": [{"message": {"content": text}}]}
 
 
 class FakeResponse(io.BytesIO):
@@ -108,135 +106,162 @@ def test_image_is_downscaled_and_sent_as_a_jpeg_data_url():
     assert sent.size == (1000, 500)
 
 
-def test_locator_requests_structured_output_without_leaking_the_key():
+def test_locator_asks_for_plain_text_fast_and_private_without_leaking_the_key():
     captured = {}
 
     def transport(body, key, timeout):
         captured.update(body=body, key=key, timeout=timeout)
-        return answer([entry("a")])
+        return answer("ab\ncd")
 
     settings = Settings(openrouter_api_key="sk-live", vision_model="vendor/model")
-    boxes = VisionLocator(settings, transport)(Image.new("RGB", (400, 300), "white"))
+    rows = VisionLocator(settings, transport)(Image.new("RGB", (400, 300), "white"))
     body = captured["body"]
-    assert body["model"] == "vendor/model" and body["provider"] == {"data_collection": "deny"}
-    assert body["response_format"]["json_schema"]["strict"] is True
+    assert rows == ["ab", "cd"]
+    assert body["model"] == "vendor/model" and "response_format" not in body
+    assert body["provider"] == {"data_collection": "deny", "sort": "throughput"}
     assert "sk-live" not in json.dumps(body)
     assert captured["key"] == "sk-live" and captured["timeout"] == settings.vision_timeout_seconds
-    assert boxes[0]["character"] == "a" and boxes[0]["x"] == pytest.approx(0.1)
+
+
+def test_a_retry_uses_the_higher_reasoning_effort():
+    efforts = []
+
+    def transport(body, key, timeout):
+        efforts.append(body["reasoning"]["effort"])
+        return answer("a")
+
+    locate = VisionLocator(
+        Settings(openrouter_api_key="k", vision_reasoning_effort="low", vision_retry_effort="high"),
+        transport,
+    )
+    image = Image.new("RGB", (50, 50), "white")
+    locate(image)
+    locate(image, 1)
+    assert efforts == ["low", "high"]
 
 
 # --- parsing -------------------------------------------------------------------------
 
 
-def test_coordinates_are_clamped_and_unusable_entries_skipped():
-    boxes = parse_glyphs(
-        answer(
-            [
-                entry("a", -50, 0, 2000, 500),  # clamped to the image
-                entry("ab"),  # not one character
-                entry("é"),  # decomposed accent
-                entry("b", 300, 300, 300, 400),  # no width
-                entry("c", 500, 500, 400, 600),  # inverted
-                {"character": "d"},  # missing coordinates
-                {"character": "f", "x0": "x", "y0": 0, "x1": 1, "y1": 1},  # not a number
-                entry(" "),  # whitespace
-                entry("z", 10, 20, 30, 40),
-            ]
-        )
-    )
-    assert [b["character"] for b in boxes] == ["a", "z"]
-    assert boxes[0]["x"] == 0 and boxes[0]["width"] == 1
+def test_rows_drop_spaces_fences_blank_lines_and_invisible_characters():
+    text = "```\nA B  C\n\n d\u200be f \n```"
+    assert parse_rows(answer(text)) == ["ABC", "def"]
+
+
+def test_text_is_composed_so_one_character_is_one_label():
+    assert parse_rows(answer("e\u0301")) == ["é"]
 
 
 @pytest.mark.parametrize(
     "response",
-    [
-        {},
-        {"choices": []},
-        {"choices": [{"message": {"content": "not json"}}]},
-        {"choices": [{"message": {"content": '{"glyphs": "nope"}'}}]},
-        {"choices": [{"message": {"content": "[]"}}]},
-    ],
+    [{}, {"choices": []}, {"choices": [{"message": {"content": None}}]}, {"choices": [{}]}],
 )
-def test_unreadable_answers_raise(response):
+def test_missing_text_raises_an_unreadable_answer_error(response):
     with pytest.raises(VisionError, match="unreadable"):
-        parse_glyphs(response)
+        parse_rows(response)
 
 
-def test_an_answer_without_any_usable_character_raises():
+def test_an_answer_without_characters_or_with_too_many_raises():
     with pytest.raises(VisionError, match="did not find"):
-        parse_glyphs(answer([entry("ab")]))
-    with pytest.raises(VisionError, match="did not find"):
-        parse_glyphs(answer([]))
-
-
-def test_more_than_the_maximum_glyphs_are_truncated():
-    boxes = parse_glyphs(answer([entry(chr(0x4E00 + i)) for i in range(200)]))
-    assert len(boxes) == vision.MAX_GLYPHS
+        parse_rows(answer("  \n \n"))
+    with pytest.raises(VisionError, match="more than"):
+        parse_rows(answer("a" * 161))
 
 
 # --- alignment -----------------------------------------------------------------------
 
-
-def box(character, x, y, width=0.05, height=0.05):
-    return {"character": character, "x": x, "y": y, "width": width, "height": height}
-
-
-def test_rows_come_from_vertical_position_and_read_left_to_right():
-    boxes = [box("b", 0.30, 0.10), box("a", 0.10, 0.11), box("d", 0.30, 0.40), box("c", 0.10, 0.40)]
-    assert rows_from_boxes(boxes) == ["ab", "cd"]
-
-
 SIZE = (1000, 1000)
+SCALE = 60.0
 
 
-def group(x, y, w=40, h=60):
+def group(x, y=100, w=40, h=60):
     return [x, y, x + w, y + h]
 
 
-def test_alignment_recovers_exact_shapes_despite_displaced_boxes():
-    groups = [group(100, 100), group(200, 100), group(300, 100)]
-    # Every model box is off by roughly a glyph width, but order is right.
-    boxes = [box("a", 0.14, 0.105), box("b", 0.24, 0.095), box("c", 0.33, 0.10)]
-    aligned, errors = align_labels(boxes, groups, 60.0, SIZE)
+def test_pair_cost_prefers_stacked_then_near_then_forbids_far_marks():
+    assert pair_cost(group(100), group(105, 200, 30, 20), SCALE) == pytest.approx(0.1)
+    assert pair_cost(group(100), group(150), SCALE) == pytest.approx(0.6)
+    assert pair_cost(group(100), group(400), SCALE) == pytest.approx(4.0)
+
+
+def test_labels_pair_with_groups_in_order():
+    groups = [group(100), group(200), group(300)]
+    assert align_order("abc", groups, SCALE) == {0: (0, 1), 1: (1, 1), 2: (2, 1)}
+
+
+def test_a_small_stray_mark_is_skipped_rather_than_a_real_glyph():
+    groups = [group(100), group(200, 100, 8, 8), group(300)]
+    assert align_order("ab", groups, SCALE) == {0: (0, 1), 1: (2, 1)}
+
+
+def test_stacked_pieces_merge_into_one_glyph():
+    groups = [group(100), group(300, 100, 12, 12), group(302, 140, 12, 12)]
+    assert align_order("a:", groups, SCALE) == {0: (0, 1), 1: (1, 2)}
+
+
+def test_a_label_with_no_mark_left_is_unmatched():
+    assert align_order("ab", [group(100)], SCALE) == {0: (0, 1)}
+    assert align_order("a", [], SCALE) == {}
+
+
+def layout(*rows):
+    return ([list(band) for band in rows], SCALE)
+
+
+def test_rows_pair_with_page_rows_and_boxes_are_exact_and_padded():
+    page = layout([group(100), group(200)], [group(100, 300)])
+    boxes, errors = align_rows(["ab", "c"], page, SIZE)
     assert errors == []
-    assert [b["character"] for b in aligned] == ["a", "b", "c"]
-    assert aligned[1]["x"] == pytest.approx((200 - 3) / 1000)
-    assert aligned[1]["width"] == pytest.approx((40 + 6) / 1000)
+    assert [b["character"] for b in boxes] == ["a", "b", "c"]
+    assert boxes[1]["x"] == pytest.approx((200 - 3) / 1000)
+    assert boxes[1]["width"] == pytest.approx(46 / 1000)
+    assert boxes[2]["y"] == pytest.approx((300 - 3) / 1000)
 
 
-def test_stray_marks_between_glyphs_are_skipped():
-    groups = [group(100, 100), group(150, 105, 6, 6), group(200, 100)]
-    aligned, errors = align_labels([box("a", 0.12, 0.12), box("b", 0.22, 0.12)], groups, 60, SIZE)
-    assert errors == [] and aligned[1]["x"] == pytest.approx((200 - 3) / 1000)
+def test_a_row_with_a_different_number_of_marks_is_reported_with_its_number():
+    page = layout([group(100), group(200)], [group(100, 300), group(200, 300), group(300, 300)])
+    boxes, errors = align_rows(["ab", "cd"], page, SIZE)
+    assert errors == ["Row 2: found 3 marks for 2 characters."]
+    assert len(boxes) == 4
 
 
-def test_pieces_of_one_glyph_merge_into_a_single_box():
-    # A colon is two marks. One label owns both.
-    groups = [group(100, 100, 40, 60), group(300, 100, 12, 12), group(302, 140, 12, 12)]
-    boxes = [box("a", 0.12, 0.12), box(":", 0.30, 0.12)]
-    aligned, errors = align_labels(boxes, groups, 60, SIZE)
-    assert errors == []
-    assert aligned[1]["y"] == pytest.approx((100 - 3) / 1000)
-    assert aligned[1]["height"] == pytest.approx((52 + 6) / 1000)
+def test_unequal_row_counts_fall_back_to_one_sequence_and_are_reported():
+    page = layout([group(100), group(200), group(300)])
+    boxes, errors = align_rows(["ab", "c"], page, SIZE)
+    assert errors == ["Found 1 rows of writing but 2 were transcribed."]
+    assert [b["character"] for b in boxes] == ["a", "b", "c"]
 
 
-def test_a_label_with_no_ink_nearby_is_reported_and_keeps_its_box():
-    groups = [group(100, 100), group(200, 100)]
-    boxes = [box("a", 0.12, 0.12), box("b", 0.22, 0.12), box("x", 0.9, 0.9)]
-    aligned, errors = align_labels(boxes, groups, 60, SIZE)
-    assert len(errors) == 1 and "'x'" in errors[0]
-    assert aligned[2] == boxes[2]
-
-
-def test_alignment_with_no_ink_reports_every_label():
-    aligned, errors = align_labels([box("a", 0.1, 0.1)], [], 60, SIZE)
-    assert errors and aligned == [box("a", 0.1, 0.1)]
+def test_a_character_with_no_ink_is_reported_and_has_no_box():
+    boxes, errors = align_rows(["ab"], layout([group(100)]), SIZE)
+    assert [b["character"] for b in boxes] == ["a"]
+    assert "The page: found 1 marks for 2 characters." in errors
+    assert "No ink was found for 'b'." in errors
 
 
 def test_boxes_are_clipped_to_the_image():
-    aligned, _ = align_labels([box("a", 0.0, 0.0)], [group(1, 1, 40, 40)], 60, SIZE)
-    assert aligned[0]["x"] == 0 and aligned[0]["y"] == 0
+    boxes, _ = align_rows(["a"], layout([group(1, 1, 40, 40)]), SIZE)
+    assert boxes[0]["x"] == 0 and boxes[0]["y"] == 0
+
+
+# --- stray marks ---------------------------------------------------------------------
+
+
+def test_small_isolated_marks_at_either_end_of_a_row_are_dropped():
+    row = [group(400 + 60 * i) for i in range(6)]
+    assert drop_stray_ends([group(5, 100, 10, 10), *row], SCALE) == row  # leading
+    assert drop_stray_ends([*row, group(900, 100, 10, 10)], SCALE) == row  # trailing
+    assert drop_stray_ends([group(5, 100, 10, 10), *row, group(900, 100, 10, 10)], SCALE) == row
+
+
+def test_end_marks_that_are_large_or_close_or_in_short_rows_are_kept():
+    row = [group(100 + 60 * i) for i in range(6)]
+    far_but_large = [*row, group(900)]
+    close_and_small = [*row, group(100 + 60 * 6, 100, 10, 10)]
+    assert drop_stray_ends(far_but_large, SCALE) == far_but_large
+    assert drop_stray_ends(close_and_small, SCALE) == close_and_small
+    short = [group(100), group(200), group(900, 100, 10, 10)]
+    assert drop_stray_ends(short, SCALE) == short
 
 
 # --- grouping ------------------------------------------------------------------------
@@ -288,38 +313,65 @@ def sheet_file(tmp_path, sheet):
     return path
 
 
-def displaced(sheet, shift=0.012):
-    # The model reads the sheet in order but places each box a little off.
-    return [b | {"x": b["x"] + shift, "y": b["y"] - shift / 2} for b in sheet[1]]
+def reads(*answers):
+    """A locator that returns each answer in turn, or raises it when it is an error."""
+    calls = []
+
+    def locate(image, attempt=0):
+        calls.append(attempt)
+        value = answers[min(len(calls), len(answers)) - 1]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    locate.calls = calls
+    return locate
 
 
-def test_vision_detection_returns_aligned_boxes_and_marks_the_detector(tmp_path, sheet, sheet_file):
-    result = analyze(
-        sheet_file, tmp_path, [], "auto", None, "vision", lambda image: displaced(sheet)
-    )
+def test_vision_detection_returns_exact_boxes_for_the_transcribed_rows(tmp_path, sheet_file):
+    locate = reads(["oiAVlmg."])
+    result = analyze(sheet_file, tmp_path, [], "auto", None, "vision", locate)
     assert result["detector"] == "vision" and result["mapping_errors"] == []
     assert [g["character"] for g in result["glyphs"]] == list("oiAVlmg.")
     assert "vision model" in result["warnings"][0]
-    # The dot of the i is part of the i, not left behind.
-    i_box = result["glyphs"][1]
-    assert i_box["y"] * 500 < 75
+    assert result["glyphs"][1]["y"] * 500 < 75  # the dot of the i is part of the i
+    assert locate.calls == [0], "an answer that agrees with the ink needs no retry"
+
+
+def test_a_transcription_that_disagrees_with_the_ink_is_retried_once_and_the_better_kept(
+    tmp_path, sheet_file
+):
+    locate = reads(["oiAVlm"], ["oiAVlmg."])
+    result = analyze(sheet_file, tmp_path, [], "auto", None, "vision", locate)
+    assert locate.calls == [0, 1] and result["mapping_errors"] == []
+    assert len(result["glyphs"]) == 8
+
+
+def test_a_worse_retry_does_not_replace_the_first_answer(tmp_path, sheet_file):
+    locate = reads(["oiAVlm"], ["oiAVlmgxyz"])
+    result = analyze(sheet_file, tmp_path, [], "auto", None, "vision", locate)
+    assert locate.calls == [0, 1]
+    assert [g["character"] for g in result["glyphs"]] == list("oiAVlm")
+
+
+def test_a_failed_retry_keeps_the_first_answer_for_review(tmp_path, sheet_file):
+    locate = reads(["oiAVlm"], VisionError("The vision service could not be reached."))
+    result = analyze(sheet_file, tmp_path, [], "auto", None, "vision", locate)
+    assert result["detector"] == "vision" and result["mapping_errors"]
+    assert len(result["glyphs"]) == 6
 
 
 def test_auto_falls_back_to_row_order_when_the_service_fails(tmp_path, sheet_file):
-    def broken(image):
-        raise VisionError("The vision service returned HTTP 500.")
-
-    result = analyze(sheet_file, tmp_path, ["oiAVlmg."], "auto", None, "auto", broken)
+    locate = reads(VisionError("The vision service returned HTTP 500."))
+    result = analyze(sheet_file, tmp_path, ["oiAVlmg."], "auto", None, "auto", locate)
     assert result["detector"] == "layout"
     assert "HTTP 500" in result["warnings"][0] and "Row order" in result["warnings"][0]
 
 
 def test_explicit_vision_fails_loudly_instead_of_falling_back(tmp_path, sheet_file):
-    def broken(image):
-        raise VisionError("The vision service could not be reached.")
-
+    locate = reads(VisionError("The vision service could not be reached."))
     with pytest.raises(ImageError, match="could not be reached"):
-        analyze(sheet_file, tmp_path, ["oiAVlmg."], "auto", None, "vision", broken)
+        analyze(sheet_file, tmp_path, ["oiAVlmg."], "auto", None, "vision", locate)
 
 
 def test_explicit_vision_without_a_locator_is_an_error(tmp_path, sheet_file):
@@ -333,21 +385,19 @@ def test_auto_without_a_locator_quietly_uses_row_order(tmp_path, sheet_file):
 
 
 def test_supplied_boxes_skip_detection_entirely(tmp_path, sheet, sheet_file):
-    def forbidden(image):
-        raise AssertionError("the model must not be called when crops are supplied")
-
-    result = analyze(sheet_file, tmp_path, [], "auto", sheet[1], "vision", forbidden)
+    locate = reads(AssertionError("the model must not be called when crops are supplied"))
+    result = analyze(sheet_file, tmp_path, [], "auto", sheet[1], "vision", locate)
     assert result["detector"] == "supplied" and result["glyphs"] == sheet[1]
+    assert locate.calls == []
 
 
-def test_a_blank_page_returns_the_models_boxes_with_an_error(tmp_path):
+def test_a_blank_page_reports_no_ink_without_a_retry(tmp_path):
     blank = tmp_path / "image.png"
     Image.new("RGB", (300, 300), "white").save(blank)
-    result = analyze(
-        blank, tmp_path, [], "auto", None, "vision", lambda image: [box("a", 0.1, 0.1)]
-    )
+    locate = reads(["abc"])
+    result = analyze(blank, tmp_path, [], "auto", None, "vision", locate)
     assert result["detector"] == "vision" and "No ink" in result["mapping_errors"][0]
-    assert result["glyphs"] == [box("a", 0.1, 0.1)]
+    assert result["glyphs"] == [] and locate.calls == [0]
 
 
 # --- API -----------------------------------------------------------------------------
@@ -366,25 +416,31 @@ def post_sheet(client, sheet, **data):
 
 
 def test_layouts_report_whether_ai_detection_is_available(tmp_path):
+    (tmp_path / "off").mkdir()
     with vision_client(tmp_path / "off", None) as client:
-        (tmp_path / "off").mkdir(exist_ok=True)
         assert client.get("/api/layouts").json()["ai_detection"] is False
     (tmp_path / "on").mkdir()
-    with vision_client(tmp_path / "on", lambda image: []) as client:
+    with vision_client(tmp_path / "on", reads(["a"])) as client:
         assert client.get("/api/layouts").json()["ai_detection"] is True
 
 
 def test_upload_uses_the_vision_detector_and_generates_when_opted_in(tmp_path, sheet):
-    with vision_client(tmp_path, lambda image: displaced(sheet)) as client:
+    with vision_client(tmp_path, reads(["oiAVlmg."])) as client:
         job = post_sheet(client, sheet, detector="vision", auto_generate="true")
         assert job["status"] == "ready" and job["detector"] == "vision"
         assert client.get(job["artifacts"]["font.ttf"]).status_code == 200
 
 
 def test_upload_requires_review_after_vision_detection_by_default(tmp_path, sheet):
-    with vision_client(tmp_path, lambda image: displaced(sheet)) as client:
+    with vision_client(tmp_path, reads(["oiAVlmg."])) as client:
         job = post_sheet(client, sheet)
         assert job["status"] == "review_required" and job["detector"] == "vision"
+
+
+def test_a_disagreeing_transcription_blocks_automatic_generation(tmp_path, sheet):
+    with vision_client(tmp_path, reads(["oiAVlm"])) as client:
+        job = post_sheet(client, sheet, detector="vision", auto_generate="true")
+        assert job["status"] == "review_required" and job["mapping_errors"]
 
 
 def test_a_configured_key_enables_detection_through_settings(tmp_path):

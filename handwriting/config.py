@@ -31,7 +31,10 @@ class Settings:
     vision_timeout_seconds: float = 120.0
     vision_max_side: int = 1568
     vision_reasoning_effort: str = field(
-        default_factory=lambda: os.getenv("VISION_REASONING_EFFORT", "medium")
+        default_factory=lambda: os.getenv("VISION_REASONING_EFFORT", "low")
+    )
+    vision_retry_effort: str = field(
+        default_factory=lambda: os.getenv("VISION_RETRY_EFFORT", "medium")
     )
     max_pending_jobs: int = 20
     max_data_bytes: int = field(

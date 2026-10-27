@@ -64,13 +64,16 @@ Uploads accept `image`, `name`, `rows`, `glyphs`, `ink_mode`, and `auto_generate
 
 Row order only works when the sheet matches the supplied rows. With `OPENROUTER_API_KEY` set, the service asks a vision model (default `openai/gpt-6-luna` on OpenRouter) to read the characters on the page, so extra letters and different layouts work. `detector` accepts `auto` (AI when configured, otherwise row order, and row order if the service fails), `vision` (AI only; the job fails if it is unavailable), or `layout`.
 
-The model's box positions are only hints, because they drift by about a glyph. It supplies the labels in reading order, and the ink geometry supplies the shapes: a small dynamic program pairs them in order, skips dust and stray marks, merges split glyphs such as a colon, and reports any label with no ink nearby. Review every crop before generating.
+The model only transcribes: one line of text per row of writing, with no coordinates, so the answer is a few hundred tokens and detection takes about 10 seconds. The shapes come from the ink itself. Rows of marks found on the page are paired with the transcribed rows, and a small dynamic program pairs characters with marks in order, skipping stray marks and merging split glyphs such as a colon. Any disagreement between the transcription and the ink (a different number of rows or of marks in a row) is reported as a mapping error, which blocks automatic generation and triggers one retry at a higher reasoning effort. Review every crop before generating.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | unset | Enables AI detection. Read from the environment only and never logged. |
-| `VISION_MODEL` | `openai/gpt-6-luna` | Any OpenRouter vision model with structured output. |
-| `VISION_REASONING_EFFORT` | `medium` | `low` is cheaper but misread a hurried `?` on one of three test runs. |
+| `VISION_MODEL` | `openai/gpt-6-luna` | An OpenRouter vision model. It must accept images and may reason. |
+| `VISION_REASONING_EFFORT` | `low` | Reasoning effort of the first attempt. |
+| `VISION_RETRY_EFFORT` | `medium` | Reasoning effort of the single retry. |
+
+Measured on two real sheets: `openai/gpt-6-luna` at low effort answered in 7 to 11 seconds and was exact in 5 of 6 runs; the miss dropped a whole row, which the row-count check reports and retries. `z-ai/glm-5.3-flash` answers in 2 to 4 seconds at low effort but drops characters that differ from the default template. `openai/gpt-oss-120b` cannot be used because it does not accept images.
 
 A detection costs a fraction of a cent. Photos are sent to OpenRouter with `data_collection: deny`, which restricts routing to providers that do not store or train on them. Tell your users when you enable this.
 

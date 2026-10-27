@@ -183,6 +183,29 @@ def tight_crop(mask: np.ndarray, box: GlyphBox) -> np.ndarray:
     return np.pad(crop[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1], 3)
 
 
+def drop_stray_ends(groups: list[list[int]], scale: float) -> list[list[int]]:
+    """Drop a small mark at either end of a row that sits far from the rest of the row.
+
+    Such a mark is a speck or a stray stroke, not a character: its gap to the row is more
+    than twice the row's usual gap between neighbours, and it is under half a glyph tall.
+    Marks inside a row are never dropped, because punctuation is legitimately small.
+    """
+    if len(groups) < 4:
+        return groups
+    gaps = [after[0] - before[2] for before, after in zip(groups, groups[1:], strict=False)]
+    limit = 2 * float(np.median(gaps))
+
+    def stray(group: list[int], gap: float) -> bool:
+        return max(group[2] - group[0], group[3] - group[1]) < 0.5 * scale and gap > limit
+
+    if stray(groups[-1], gaps[-1]):
+        groups = groups[:-1]
+        gaps = gaps[:-1]
+    if stray(groups[0], gaps[0]):
+        groups = groups[1:]
+    return groups
+
+
 def layout_groups(
     mask: np.ndarray, rows: list[str], speck: float = 0.0
 ) -> tuple[list[list[list[int]]], float] | None:
@@ -272,6 +295,8 @@ def layout_groups(
                 groups[-1] = [old[0], min(y, old[1]), max(x + w, old[2]), max(y + h, old[3])]
             else:
                 groups.append([x, y, x + w, y + h])
+        if speck:
+            groups = drop_stray_ends(groups, typical_height)
         grouped.append(groups)
     return grouped, typical_height
 
@@ -317,106 +342,114 @@ def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[s
     return boxes, errors
 
 
-def rows_from_boxes(boxes: list[dict], gap: float = 0.025) -> list[str]:
-    """Group the model's labels into text rows by vertical centre, left to right."""
-    ordered = sorted(boxes, key=lambda b: b["y"] + b["height"] / 2)
-    rows: list[list[dict]] = []
-    for box in ordered:
-        centre = box["y"] + box["height"] / 2
-        if rows and centre - np.mean([b["y"] + b["height"] / 2 for b in rows[-1]]) <= gap:
-            rows[-1].append(box)
-        else:
-            rows.append([box])
-    return ["".join(b["character"] for b in sorted(row, key=lambda b: b["x"])) for row in rows]
-
-
 DUST = 0.08  # On real photos dust is under 0.065 of glyph height and pen dots over 0.10.
-SKIP_GROUP = 1.2  # A stray mark is cheaper to ignore than to label wrongly.
-MISS_LABEL = 3.0  # A label with no ink nearby is reported rather than forced onto a mark.
-MERGE_PART = 0.4  # Extra cost for each additional piece merged into one glyph.
+SKIP_GROUP = 1.0  # Dust is already gone, so an unlabelled mark is probably a real glyph.
+MISS_LABEL = 3.0  # A label with no mark left for it is reported, not forced onto one.
+PAIR_STACKED = 0.1  # Marks over each other, like the dots of a colon, belong together.
+PAIR_NEAR = 0.6  # Marks side by side and close, like the ticks of a quote.
+PAIR_FAR = 4.0  # Marks apart are separate glyphs, so merging them is almost forbidden.
 MAX_PARTS = 3
 
 
-def align_labels(
-    boxes: list[dict], groups: list[list[int]], scale: float, size: tuple[int, int]
-) -> tuple[list[dict], list[str]]:
-    """Match the model's ordered labels to ink groups found in reading order.
+def pair_cost(first: list[int], second: list[int], scale: float) -> float:
+    """Cost of treating two neighbouring marks as parts of one glyph."""
+    overlap = min(first[2], second[2]) - max(first[0], second[0])
+    if overlap >= 0.3 * min(first[2] - first[0], second[2] - second[0]):
+        return PAIR_STACKED
+    gap = max(first[0], second[0]) - min(first[2], second[2])
+    return PAIR_NEAR if gap <= 0.3 * scale else PAIR_FAR
 
-    The model reads characters reliably but places boxes loosely. Ink groups give exact
-    shapes but no labels. A dynamic program pairs them in order, using the model's box
-    centres only as distances: it can skip stray marks, merge split glyphs such as a colon
-    or a quote, and leave a label unmatched when no ink is near it.
+
+def align_order(labels: str, groups: list[list[int]], scale: float) -> dict[int, tuple[int, int]]:
+    """Pair labels with ink groups in order, returning label index -> (first group, count).
+
+    A dynamic program may skip a group, leave a label unmatched, or merge up to three
+    neighbouring groups into one glyph. Larger marks are slightly preferred, so a skip
+    falls on the smaller mark when two are equally plausible.
     """
-    width, height = size
-    labels, parts = len(boxes), len(groups)
-    centres = [
-        ((b["x"] + b["width"] / 2) * width, (b["y"] + b["height"] / 2) * height) for b in boxes
-    ]
+    count, parts = len(labels), len(groups)
 
-    def union(first: int, count: int) -> list[int]:
-        chosen = groups[first : first + count]
-        return [
-            min(g[0] for g in chosen),
-            min(g[1] for g in chosen),
-            max(g[2] for g in chosen),
-            max(g[3] for g in chosen),
-        ]
+    def size(group: list[int]) -> float:
+        return min(1.0, max(group[2] - group[0], group[3] - group[1]) / scale)
 
-    def distance(label: int, first: int, count: int) -> float:
-        x0, y0, x1, y1 = union(first, count)
-        dx, dy = (x0 + x1) / 2 - centres[label][0], (y0 + y1) / 2 - centres[label][1]
-        return float(np.hypot(dx, dy)) / scale + MERGE_PART * (count - 1)
-
-    best = np.full((labels + 1, parts + 1), np.inf)
+    best = np.full((count + 1, parts + 1), np.inf)
     came: dict[tuple[int, int], tuple[int, int, int]] = {}
     best[0, 0] = 0.0
-    for label in range(labels + 1):
+    for label in range(count + 1):
         for part in range(parts + 1):
-            here = best[label, part]
             moves = []
             if part < parts:
                 moves.append((label, part + 1, SKIP_GROUP, 0))
-            if label < labels:
-                moves.append((label + 1, part, MISS_LABEL, 0))
-                for count in range(1, min(MAX_PARTS, parts - part) + 1):
-                    moves.append((label + 1, part + count, distance(label, part, count), count))
-            for next_label, next_part, cost, used in moves:
-                if here + cost < best[next_label, next_part]:
-                    best[next_label, next_part] = here + cost
+            if label < count:
+                # Ties are settled deterministically: the later label is left unmatched.
+                moves.append((label + 1, part, MISS_LABEL + 0.001 * (count - label), 0))
+                cost = 0.0
+                for used in range(1, min(MAX_PARTS, parts - part) + 1):
+                    if used > 1:
+                        cost += pair_cost(groups[part + used - 2], groups[part + used - 1], scale)
+                    moves.append(
+                        (label + 1, part + used, cost + 0.3 * (1 - size(groups[part])), used)
+                    )
+            for next_label, next_part, step, used in moves:
+                if best[label, part] + step < best[next_label, next_part]:
+                    best[next_label, next_part] = best[label, part] + step
                     came[(next_label, next_part)] = (label, part, used)
     matched: dict[int, tuple[int, int]] = {}
-    label, part = labels, parts
+    label, part = count, parts
     while (label, part) != (0, 0):
         previous_label, previous_part, used = came[(label, part)]
         if used:
             matched[previous_label] = (previous_part, used)
         label, part = previous_label, previous_part
-    aligned, errors, pad = [], [], 3
-    for index, box in enumerate(boxes):
-        if index not in matched:
-            errors.append(f"No ink was found for {box['character']!r}. Redraw or remove its crop.")
-            aligned.append(box)
-            continue
-        x0, y0, x1, y1 = union(*matched[index])
-        x0, y0, x1, y1 = (
-            max(0, x0 - pad),
-            max(0, y0 - pad),
-            min(width, x1 + pad),
-            min(height, y1 + pad),
-        )
-        aligned.append(
-            box
-            | {
-                "x": x0 / width,
-                "y": y0 / height,
-                "width": (x1 - x0) / width,
-                "height": (y1 - y0) / height,
-            }
-        )
-    return aligned, errors
+    return matched
 
 
-Locator = Callable[[Image.Image], list[dict]]
+def align_rows(
+    rows: list[str], layout: tuple[list[list[list[int]]], float], size: tuple[int, int]
+) -> tuple[list[dict], list[str]]:
+    """Turn the model's transcribed rows and the page's ink groups into labelled boxes.
+
+    Rows are paired with the page's text rows when their numbers agree, which stops one
+    wrong count from shifting every label after it. Any disagreement in the numbers of
+    rows or marks is reported, so a person reviews before a font is built.
+    """
+    bands, scale = layout
+    width, height = size
+    errors = []
+    if len(bands) == len(rows):
+        pairs = list(zip(rows, bands, strict=True))
+    else:
+        errors.append(f"Found {len(bands)} rows of writing but {len(rows)} were transcribed.")
+        pairs = [("".join(rows), [group for band in bands for group in band])]
+    boxes, pad = [], 3
+    for number, (line, groups) in enumerate(pairs, start=1):
+        place = f"Row {number}" if len(pairs) > 1 else "The page"
+        if len(groups) != len(line):
+            errors.append(f"{place}: found {len(groups)} marks for {len(line)} characters.")
+        matched = align_order(line, groups, scale)
+        for index, character in enumerate(line):
+            if index not in matched:
+                errors.append(f"No ink was found for {character!r}.")
+                continue
+            first, used = matched[index]
+            chosen = groups[first : first + used]
+            x0 = max(0, min(g[0] for g in chosen) - pad)
+            y0 = max(0, min(g[1] for g in chosen) - pad)
+            x1 = min(width, max(g[2] for g in chosen) + pad)
+            y1 = min(height, max(g[3] for g in chosen) + pad)
+            boxes.append(
+                GlyphBox(
+                    character=character,
+                    x=x0 / width,
+                    y=y0 / height,
+                    width=(x1 - x0) / width,
+                    height=(y1 - y0) / height,
+                ).model_dump()
+            )
+    return boxes, errors
+
+
+Locator = Callable[[Image.Image, int], list[str]]
 
 BASE_WARNINGS = [
     "One sample per character is used. Repeated labels use their first crop.",
@@ -443,14 +476,25 @@ def analyze(
         raise ImageError("AI character detection is not configured on this server.")
     if not supplied_boxes and detector != "layout" and locate is not None:
         try:
-            proposals = locate(picture)
             proposal_mask, _ = ink_mask(picture, mode, for_inference=True)
-            layout = layout_groups(proposal_mask, rows_from_boxes(proposals), DUST)
-            if layout is None:
-                boxes, errors = proposals, ["No ink detected. Try another ink mode or photo."]
-            else:
-                flat = [group for band in layout[0] for group in band]
-                boxes, errors = align_labels(proposals, flat, layout[1], picture.size)
+            outcome = None
+            for attempt in (0, 1):
+                try:
+                    rows = locate(picture, attempt)
+                except VisionError:
+                    if outcome is None:
+                        raise
+                    break  # keep the first answer rather than lose it to a failed retry
+                layout = layout_groups(proposal_mask, rows, DUST)
+                if layout is None:
+                    outcome = ([], ["No ink detected. Try another ink mode or photo."])
+                    break
+                result = align_rows(rows, layout, picture.size)
+                if outcome is None or len(result[1]) < len(outcome[1]):
+                    outcome = result
+                if not outcome[1]:
+                    break  # the transcription agrees with the ink, so it needs no retry
+            boxes, errors = outcome
             used = "vision"
         except VisionError as exc:
             if detector == "vision":
