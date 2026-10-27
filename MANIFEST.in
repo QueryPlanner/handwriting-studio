@@ -1,0 +1,7 @@
+include requirements.lock
+include requirements-runtime.lock
+include examples/reference.png
+include examples/glyphs.json
+include examples/run_sample.py
+include examples/make_reference.py
+recursive-include tests *.py

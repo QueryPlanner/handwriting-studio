@@ -1,0 +1,10 @@
+**
+!vercel.json
+!scripts/
+!scripts/build-site.mjs
+!handwriting/
+!handwriting/static/
+!handwriting/static/index.html
+!handwriting/static/studio.js
+!handwriting/static/studio.css
+!handwriting/static/daisyui.css

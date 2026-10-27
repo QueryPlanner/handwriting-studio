@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!requirements-runtime.lock
+!handwriting/
+!handwriting/**
+handwriting/**/__pycache__/
+handwriting/**/*.pyc

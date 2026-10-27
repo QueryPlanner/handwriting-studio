@@ -1,0 +1,18 @@
+name: Validate
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.lock
+      - run: python -m pip install --no-deps -e .
+      - run: ruff check handwriting tests examples
+      - run: ruff format --check handwriting tests examples
+      - run: coverage run -m pytest -q
+      - run: coverage report -m --fail-under=100
+      - run: node --check handwriting/static/studio.js
+      - run: node scripts/build-site.mjs
