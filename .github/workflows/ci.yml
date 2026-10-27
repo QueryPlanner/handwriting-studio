@@ -15,4 +15,5 @@ jobs:
       - run: coverage run -m pytest -q
       - run: coverage report -m --fail-under=100
       - run: node --check handwriting/static/studio.js
+      - run: node --check handwriting/static/theme.js
       - run: node scripts/build-site.mjs

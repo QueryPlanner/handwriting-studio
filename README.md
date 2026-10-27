@@ -2,7 +2,7 @@
 
 A Python FastAPI service that turns photographs of separately written characters into TTF and WOFF2 fonts. SQLite stores jobs, mappings, revisions, warnings, and conversion results. Font files and normalized source images live in a local data directory.
 
-The included browser studio uploads a page, displays proposed letter crops, lets users correct labels and boxes, and previews the generated WOFF2 font. The frontend can run on Vercel while the API and SQLite storage run on a persistent Docker server. All studio assets are included, including daisyUI. No external AI service receives the image.
+The included browser studio is one step: choose a photo and it reads the letters, builds the font, and offers a try-it box and downloads. The frontend can run on Vercel while the API and SQLite storage run on a persistent Docker server. All studio assets are included and self-hosted: the Lord Handwriting font for headings, and Noto Sans for interface text.
 
 ## Run locally
 
@@ -58,7 +58,7 @@ For reliable automation, supply reviewed crop boxes. `examples/reference.png` is
 | `POST /api/fonts/{id}/preview` | PNG preview of supplied text |
 | `GET /api/fonts/{id}/preview` | PNG preview through query parameters |
 
-Uploads accept `image`, `name`, `rows`, `glyphs`, `ink_mode`, and `auto_generate`. `rows` and `glyphs` are JSON strings inside multipart form data. `ink_mode` accepts `auto`, `blue`, or `dark`. Names accept letters, numbers, spaces, dots, and hyphens.
+Uploads accept `image`, `name`, `rows`, `glyphs`, `ink_mode`, `detector`, `auto_generate`, and `allow_partial`. With `auto_generate`, `allow_partial=true` builds the font from the characters that were found even when some marks could not be matched; the job's `mapping_errors` still lists them. A job with no usable characters still stops at `review_required`. The studio sets both. `rows` and `glyphs` are JSON strings inside multipart form data. `ink_mode` accepts `auto`, `blue`, or `dark`. Names accept letters, numbers, spaces, dots, and hyphens.
 
 ### AI character detection
 
@@ -161,7 +161,7 @@ ruff check handwriting tests examples
 ruff format --check handwriting tests examples
 coverage run -m pytest -q
 coverage report -m --fail-under=100
-node --check handwriting/static/studio.js
+node --check handwriting/static/studio.js && node --check handwriting/static/theme.js
 ```
 
 With the API running, exercise the supplied photo through HTTP and download the results:
@@ -203,4 +203,4 @@ The installed Starlette test client emits one deprecation warning about HTTPX. H
 - [OpenCV contour hierarchy](https://docs.opencv.org/4.x/d9/d8b/tutorial_py_contours_hierarchy.html)
 - [Pillow font rendering](https://pillow.readthedocs.io/en/stable/reference/ImageFont.html)
 
-daisyUI 5.5.19 is vendored under its MIT license in `handwriting/static/daisyui-LICENSE.txt`.
+Noto Sans is vendored under the SIL Open Font License in `handwriting/static/fonts/NotoSans-OFL.txt`.

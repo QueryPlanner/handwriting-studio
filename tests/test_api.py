@@ -13,7 +13,8 @@ from tests.conftest import upload_sheet, wait_job
 def test_studio_docs_and_explicit_cors(client):
     assert client.get("/").status_code == 200
     assert client.get("/static/studio.js").status_code == 200
-    assert client.get("/static/daisyui.css").status_code == 200
+    assert client.get("/static/theme.js").status_code == 200
+    assert client.get("/static/fonts/lord-handwriting.woff2").status_code == 200
     assert client.get("/health").json() == {"status": "ok"}
     assert client.get("/api/layouts").json()["default_rows"][0] == "ABCDEFGHIJK"
     assert "/api/fonts/{job_id}/preview" in client.get("/openapi.json").json()["paths"]
