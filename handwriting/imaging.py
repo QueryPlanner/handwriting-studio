@@ -53,6 +53,73 @@ def decode_image(data: bytes, settings: Settings) -> Image.Image:
         raise ImageError("The file is not a supported, readable image.") from exc
 
 
+LINE_STEP = 4
+LINE_BAND = 4
+
+
+def _line_reach(
+    mask: np.ndarray, x: float, y: float, slope: float, direction: int, reach: int
+) -> tuple[float, float]:
+    """Follow a ruled line from one detected end while ink still lies under it."""
+    height, width = mask.shape
+    start, gap = x, 0
+    while 0 <= x + direction * LINE_STEP < width:
+        x += direction * LINE_STEP
+        row = round(y + slope * (x - start))
+        if not 0 <= row < height:
+            break
+        hit = mask[max(0, row - LINE_BAND) : row + LINE_BAND + 1, int(x)].any()
+        gap = 0 if hit else gap + LINE_STEP
+        if gap > reach:
+            x -= direction * gap
+            break
+    return x, y + slope * (x - start)
+
+
+def remove_ruled_lines(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    """Erase long, nearly horizontal rules from a dark-ink mask.
+
+    Rules are found geometrically, because black pen and printed lines share a
+    colour. Ink inside the erased zone comes back where it is blue-shifted (ruled
+    lines are warm or neutral) or where a stroke continues across the line.
+    """
+    height, width = mask.shape
+    scale = min(1.0, 1200 / max(height, width))
+    small = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    segments = cv2.HoughLinesP(
+        (small > 127).astype(np.uint8) * 255,
+        1,
+        np.pi / 720,
+        threshold=int(0.18 * small.shape[1]),
+        minLineLength=int(0.30 * small.shape[1]),
+        maxLineGap=int(0.04 * small.shape[1]),
+    )
+    if segments is None:
+        return mask
+    zone = np.zeros_like(mask)
+    thickness, reach = max(5, round(width / 260)), int(0.04 * width)
+    for x0, y0, x1, y1 in segments.reshape(-1, 4) / scale:
+        (x0, y0), (x1, y1) = sorted([(x0, y0), (x1, y1)])
+        if x1 == x0 or abs(np.degrees(np.arctan2(y1 - y0, x1 - x0))) > 8:
+            continue
+        slope = (y1 - y0) / (x1 - x0)
+        left = _line_reach(mask, x0, y0, slope, -1, reach)
+        right = _line_reach(mask, x1, y1, slope, 1, reach)
+        cv2.line(
+            zone,
+            (round(left[0]), round(left[1])),
+            (round(right[0]), round(right[1])),
+            255,
+            thickness,
+        )
+    stripped = cv2.bitwise_and(mask, cv2.bitwise_not(zone))
+    # A stroke that crossed a rule has a gap now. Close it where ink meets on both sides.
+    bridge = cv2.getStructuringElement(cv2.MORPH_RECT, (1, thickness * 2 + 1))
+    bridged = cv2.morphologyEx(stripped, cv2.MORPH_CLOSE, bridge)
+    blue_shifted = ((rgb[:, :, 2] - rgb[:, :, 0]) > 5).astype(np.uint8) * 255
+    return stripped | ((bridged | blue_shifted) & zone & mask)
+
+
 def ink_mask(
     image: Image.Image, mode: str = "auto", *, for_inference: bool = False
 ) -> tuple[np.ndarray, str]:
@@ -70,6 +137,7 @@ def ink_mask(
     else:
         selected = "dark"
         mask = ((normalized < 185) & (gray < 180)).astype(np.uint8) * 255
+    mask = remove_ruled_lines(mask, rgb)
     # Ink must be surrounded by neutral or warm paper. This excludes blue fabric
     # and dark page bindings without assuming fixed coordinates for the sheet.
     if for_inference:
