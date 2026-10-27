@@ -60,6 +60,20 @@ For reliable automation, supply reviewed crop boxes. `examples/reference.png` is
 
 Uploads accept `image`, `name`, `rows`, `glyphs`, `ink_mode`, and `auto_generate`. `rows` and `glyphs` are JSON strings inside multipart form data. `ink_mode` accepts `auto`, `blue`, or `dark`. Names accept letters, numbers, spaces, dots, and hyphens.
 
+### AI character detection
+
+Row order only works when the sheet matches the supplied rows. With `OPENROUTER_API_KEY` set, the service asks a vision model (default `openai/gpt-6-luna` on OpenRouter) to read the characters on the page, so extra letters and different layouts work. `detector` accepts `auto` (AI when configured, otherwise row order, and row order if the service fails), `vision` (AI only; the job fails if it is unavailable), or `layout`.
+
+The model's box positions are only hints, because they drift by about a glyph. It supplies the labels in reading order, and the ink geometry supplies the shapes: a small dynamic program pairs them in order, skips dust and stray marks, merges split glyphs such as a colon, and reports any label with no ink nearby. Review every crop before generating.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | unset | Enables AI detection. Read from the environment only and never logged. |
+| `VISION_MODEL` | `openai/gpt-6-luna` | Any OpenRouter vision model with structured output. |
+| `VISION_REASONING_EFFORT` | `medium` | `low` is cheaper but misread a hurried `?` on one of three test runs. |
+
+A detection costs a fraction of a cent. Photos are sent to OpenRouter with `data_collection: deny`, which restricts routing to providers that do not store or train on them. Tell your users when you enable this.
+
 ```bash
 curl -X POST http://127.0.0.1:8000/api/fonts \
   -F 'image=@examples/reference.png' \

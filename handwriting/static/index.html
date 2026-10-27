@@ -32,9 +32,15 @@
           <label for="file">Handwriting photo</label>
           <input class="file-input" id="file" type="file" accept="image/jpeg,image/png,image/webp" required>
           <small>JPEG, PNG, or WebP · Up to 15 MiB · 64 megapixels for JPEG</small>
+          <p id="ai-note" hidden><small>Letters are found with an AI vision model. Your photo is sent to OpenRouter, which is asked to use only providers that do not store it or train on it. Choose row order below to keep it on this server.</small></p>
           <details>
             <summary>Character order and ink settings</summary>
-            <label for="rows">One row per line, in the order you wrote it</label>
+            <label for="detector">Finding your letters</label>
+            <select class="select" id="detector">
+              <option value="auto">Automatic: AI when available, otherwise row order</option>
+              <option value="layout">Row order only (no AI)</option>
+            </select>
+            <label for="rows">Row order, used when AI is off: one row per line, in the order you wrote it</label>
             <textarea class="textarea" id="rows" rows="9" spellcheck="false"></textarea>
             <label for="ink">Ink extraction</label>
             <select class="select" id="ink">

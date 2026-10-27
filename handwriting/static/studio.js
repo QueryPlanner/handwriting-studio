@@ -131,6 +131,7 @@ $("upload-form").addEventListener("submit", async event => {
     form.append("name", $("name").value);
     form.append("rows", JSON.stringify($("rows").value.split("\n").filter(Boolean)));
     form.append("ink_mode", $("ink").value);
+    form.append("detector", $("detector").value);
     $("upload-button").disabled = true;
     $("review").hidden = true;
     $("downloads").hidden = true;
@@ -208,6 +209,7 @@ canvas.addEventListener("pointerup", event => {
 canvas.addEventListener("pointercancel", () => { dragStart = dragEnd = null; drawing = false; draw(); });
 api("/api/layouts").then(layout => {
   $("rows").value = layout.default_rows.join("\n");
+  $("ai-note").hidden = !layout.ai_detection;
   if (/^#[0-9a-f]{32}$/.test(location.hash)) poll(location.hash.slice(1));
 }).catch(error => notify(error.message, true));
 window.addEventListener("hashchange", () => {

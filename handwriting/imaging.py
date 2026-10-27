@@ -2,6 +2,7 @@
 
 import io
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
@@ -10,6 +11,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from handwriting.config import Settings
 from handwriting.models import GlyphBox
+from handwriting.vision import VisionError
 
 
 class ImageError(ValueError):
@@ -117,7 +119,12 @@ def remove_ruled_lines(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
     bridge = cv2.getStructuringElement(cv2.MORPH_RECT, (1, thickness * 2 + 1))
     bridged = cv2.morphologyEx(stripped, cv2.MORPH_CLOSE, bridge)
     blue_shifted = ((rgb[:, :, 2] - rgb[:, :, 0]) > 5).astype(np.uint8) * 255
-    return stripped | ((bridged | blue_shifted) & zone & mask)
+    restored = stripped | ((bridged | blue_shifted) & zone & mask)
+    # A curved rule can poke out of the zone as a hairline. Open only near rules so real
+    # strokes elsewhere keep their shape.
+    near = cv2.dilate(zone, np.ones((thickness * 2 + 1, 1), np.uint8))
+    opened = cv2.morphologyEx(restored, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return np.where(near > 0, opened, restored).astype(np.uint8)
 
 
 def ink_mask(
@@ -176,11 +183,14 @@ def tight_crop(mask: np.ndarray, box: GlyphBox) -> np.ndarray:
     return np.pad(crop[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1], 3)
 
 
-def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[str]]:
-    """Estimate a common row slope, then group components by reading order.
+def layout_groups(
+    mask: np.ndarray, rows: list[str], speck: float = 0.0
+) -> tuple[list[list[list[int]]], float] | None:
+    """Group ink into glyph-sized boxes per text row, in reading order.
 
-    This proposes labels from the supplied row strings. A matching count is not
-    recognition. Callers must review proposals or explicitly accept inference.
+    Returns None when the mask has no ink. `rows` only guides how many rows to expect.
+    Marks with an area below (speck x typical glyph height) squared are dust and ignored.
+    Each box is [x0, y0, x1, y1] in pixels, with the typical glyph height.
     """
     height, width = mask.shape
     count, _, stats, centers = cv2.connectedComponentsWithStats(mask, 8)
@@ -190,7 +200,7 @@ def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[s
         if stats[i, cv2.CC_STAT_AREA] >= 3
     ]
     if not components:
-        return [], ["No ink detected. Try a tighter crop, brighter light, or another ink mode."]
+        return None
     # Each component votes by area. The projection rewards aligned text rows.
     ys, xs = np.nonzero(mask[::3, ::3])
     best_score, slope = -1.0, 0.0
@@ -203,6 +213,7 @@ def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[s
             best_score, slope = score, float(candidate)
     # Group tall/main strokes first. Add detached dots after row estimation.
     typical_height = float(np.percentile([c[0][3] for c in components], 75))
+    components = [c for c in components if c[0][4] >= (speck * typical_height) ** 2]
     main = [c for c in components if c[0][3] >= max(7, typical_height * 0.45)]
     bands: list[list] = []
     for comp in sorted(main, key=lambda c: c[1][1] - slope * c[1][0]):
@@ -236,9 +247,6 @@ def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[s
         if distances[closest] > typical_height * 1.8:
             break
         bands[closest].extend(bands.pop(closest + 1))
-    errors = []
-    if len(bands) != len(rows):
-        errors.append(f"Detected {len(bands)} rows; expected {len(rows)}. Supply corrected crops.")
     assigned = {id(c) for band in bands for c in band}
     band_coordinates = {id(band): [c[1][1] - slope * c[1][0] for c in band] for band in bands}
     for comp in components:
@@ -253,8 +261,8 @@ def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[s
         distance = band_distance(nearest)
         if distance < typical_height * 1.4:
             nearest.append(comp)
-    boxes = []
-    for row_index, (band, characters) in enumerate(zip(bands, rows, strict=False)):
+    grouped = []
+    for band in bands:
         # Merge pieces that overlap in x or have very small horizontal gaps.
         groups: list[list[int]] = []
         for stats_, _ in sorted(band, key=lambda c: c[0][0]):
@@ -264,6 +272,26 @@ def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[s
                 groups[-1] = [old[0], min(y, old[1]), max(x + w, old[2]), max(y + h, old[3])]
             else:
                 groups.append([x, y, x + w, y + h])
+        grouped.append(groups)
+    return grouped, typical_height
+
+
+def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[str]]:
+    """Label row-ordered glyph groups with the supplied row strings.
+
+    A matching count is not recognition. Callers must review proposals or explicitly
+    accept inference.
+    """
+    height, width = mask.shape
+    layout = layout_groups(mask, rows)
+    if layout is None:
+        return [], ["No ink detected. Try a tighter crop, brighter light, or another ink mode."]
+    bands = layout[0]
+    errors = []
+    if len(bands) != len(rows):
+        errors.append(f"Detected {len(bands)} rows; expected {len(rows)}. Supply corrected crops.")
+    boxes = []
+    for row_index, (groups, characters) in enumerate(zip(bands, rows, strict=False)):
         if len(groups) != len(characters):
             errors.append(
                 f"Row {row_index + 1}: found {len(groups)} glyphs for {len(characters)} labels. "
@@ -289,22 +317,158 @@ def propose_boxes(mask: np.ndarray, rows: list[str]) -> tuple[list[dict], list[s
     return boxes, errors
 
 
-def analyze(
-    source: Path, output: Path, rows: list[str], mode: str, supplied_boxes: list[dict] | None = None
-) -> dict:
-    with Image.open(source) as image:
-        mask, selected_mode = ink_mask(image.convert("RGB"), mode)
-        proposal_mask, _ = ink_mask(image.convert("RGB"), mode, for_inference=True)
-    Image.fromarray(255 - mask).save(output / "mask.png")
-    boxes, errors = (supplied_boxes, []) if supplied_boxes else propose_boxes(proposal_mask, rows)
-    warnings_ = [
-        "Labels follow the supplied row order, not handwriting recognition. Review every crop.",
-        "One sample per character is used. Repeated labels use their first crop.",
-        "Stroke smoothing is conservative. Weight and placement remain estimates.",
+def rows_from_boxes(boxes: list[dict], gap: float = 0.025) -> list[str]:
+    """Group the model's labels into text rows by vertical centre, left to right."""
+    ordered = sorted(boxes, key=lambda b: b["y"] + b["height"] / 2)
+    rows: list[list[dict]] = []
+    for box in ordered:
+        centre = box["y"] + box["height"] / 2
+        if rows and centre - np.mean([b["y"] + b["height"] / 2 for b in rows[-1]]) <= gap:
+            rows[-1].append(box)
+        else:
+            rows.append([box])
+    return ["".join(b["character"] for b in sorted(row, key=lambda b: b["x"])) for row in rows]
+
+
+DUST = 0.08  # On real photos dust is under 0.065 of glyph height and pen dots over 0.10.
+SKIP_GROUP = 1.2  # A stray mark is cheaper to ignore than to label wrongly.
+MISS_LABEL = 3.0  # A label with no ink nearby is reported rather than forced onto a mark.
+MERGE_PART = 0.4  # Extra cost for each additional piece merged into one glyph.
+MAX_PARTS = 3
+
+
+def align_labels(
+    boxes: list[dict], groups: list[list[int]], scale: float, size: tuple[int, int]
+) -> tuple[list[dict], list[str]]:
+    """Match the model's ordered labels to ink groups found in reading order.
+
+    The model reads characters reliably but places boxes loosely. Ink groups give exact
+    shapes but no labels. A dynamic program pairs them in order, using the model's box
+    centres only as distances: it can skip stray marks, merge split glyphs such as a colon
+    or a quote, and leave a label unmatched when no ink is near it.
+    """
+    width, height = size
+    labels, parts = len(boxes), len(groups)
+    centres = [
+        ((b["x"] + b["width"] / 2) * width, (b["y"] + b["height"] / 2) * height) for b in boxes
     ]
+
+    def union(first: int, count: int) -> list[int]:
+        chosen = groups[first : first + count]
+        return [
+            min(g[0] for g in chosen),
+            min(g[1] for g in chosen),
+            max(g[2] for g in chosen),
+            max(g[3] for g in chosen),
+        ]
+
+    def distance(label: int, first: int, count: int) -> float:
+        x0, y0, x1, y1 = union(first, count)
+        dx, dy = (x0 + x1) / 2 - centres[label][0], (y0 + y1) / 2 - centres[label][1]
+        return float(np.hypot(dx, dy)) / scale + MERGE_PART * (count - 1)
+
+    best = np.full((labels + 1, parts + 1), np.inf)
+    came: dict[tuple[int, int], tuple[int, int, int]] = {}
+    best[0, 0] = 0.0
+    for label in range(labels + 1):
+        for part in range(parts + 1):
+            here = best[label, part]
+            moves = []
+            if part < parts:
+                moves.append((label, part + 1, SKIP_GROUP, 0))
+            if label < labels:
+                moves.append((label + 1, part, MISS_LABEL, 0))
+                for count in range(1, min(MAX_PARTS, parts - part) + 1):
+                    moves.append((label + 1, part + count, distance(label, part, count), count))
+            for next_label, next_part, cost, used in moves:
+                if here + cost < best[next_label, next_part]:
+                    best[next_label, next_part] = here + cost
+                    came[(next_label, next_part)] = (label, part, used)
+    matched: dict[int, tuple[int, int]] = {}
+    label, part = labels, parts
+    while (label, part) != (0, 0):
+        previous_label, previous_part, used = came[(label, part)]
+        if used:
+            matched[previous_label] = (previous_part, used)
+        label, part = previous_label, previous_part
+    aligned, errors, pad = [], [], 3
+    for index, box in enumerate(boxes):
+        if index not in matched:
+            errors.append(f"No ink was found for {box['character']!r}. Redraw or remove its crop.")
+            aligned.append(box)
+            continue
+        x0, y0, x1, y1 = union(*matched[index])
+        x0, y0, x1, y1 = (
+            max(0, x0 - pad),
+            max(0, y0 - pad),
+            min(width, x1 + pad),
+            min(height, y1 + pad),
+        )
+        aligned.append(
+            box
+            | {
+                "x": x0 / width,
+                "y": y0 / height,
+                "width": (x1 - x0) / width,
+                "height": (y1 - y0) / height,
+            }
+        )
+    return aligned, errors
+
+
+Locator = Callable[[Image.Image], list[dict]]
+
+BASE_WARNINGS = [
+    "One sample per character is used. Repeated labels use their first crop.",
+    "Stroke smoothing is conservative. Weight and placement remain estimates.",
+]
+
+
+def analyze(
+    source: Path,
+    output: Path,
+    rows: list[str],
+    mode: str,
+    supplied_boxes: list[dict] | None = None,
+    detector: str = "layout",
+    locate: Locator | None = None,
+) -> dict:
+    """Find the glyph boxes. `detector` is "layout", "vision" or "auto" (vision, else layout)."""
+    with Image.open(source) as image:
+        picture = image.convert("RGB")
+    mask, selected_mode = ink_mask(picture, mode)
+    Image.fromarray(255 - mask).save(output / "mask.png")
+    notes, used, boxes, errors = [], "supplied", supplied_boxes, []
+    if not supplied_boxes and detector == "vision" and locate is None:
+        raise ImageError("AI character detection is not configured on this server.")
+    if not supplied_boxes and detector != "layout" and locate is not None:
+        try:
+            proposals = locate(picture)
+            proposal_mask, _ = ink_mask(picture, mode, for_inference=True)
+            layout = layout_groups(proposal_mask, rows_from_boxes(proposals), DUST)
+            if layout is None:
+                boxes, errors = proposals, ["No ink detected. Try another ink mode or photo."]
+            else:
+                flat = [group for band in layout[0] for group in band]
+                boxes, errors = align_labels(proposals, flat, layout[1], picture.size)
+            used = "vision"
+        except VisionError as exc:
+            if detector == "vision":
+                raise ImageError(str(exc)) from exc
+            notes.append(f"AI character detection failed ({exc}) Row order was used instead.")
+    if not supplied_boxes and used != "vision":
+        proposal_mask, _ = ink_mask(picture, mode, for_inference=True)
+        boxes, errors = propose_boxes(proposal_mask, rows)
+        used = "layout"
+    lead = (
+        "Characters were located and labelled by a vision model. Review every crop and label."
+        if used == "vision"
+        else "Labels follow the supplied row order, not handwriting recognition. Review every crop."
+    )
     return {
         "glyphs": boxes,
         "mapping_errors": errors,
-        "warnings": warnings_,
+        "warnings": [*notes, lead, *BASE_WARNINGS],
         "ink_mode": selected_mode,
+        "detector": used,
     }
