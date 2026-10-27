@@ -18,7 +18,7 @@ from collections.abc import Callable
 from PIL import Image
 
 from handwriting.config import Settings
-from handwriting.models import DEFAULT_ROWS
+from handwriting.models import DEFAULT_ROWS, LOOKALIKES
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def parse_rows(response: dict) -> list[str]:
         # Drop whitespace the model adds between characters, and any unusable character.
         kept = "".join(
             c
-            for c in unicodedata.normalize("NFC", line)
+            for c in unicodedata.normalize("NFC", line).translate(LOOKALIKES)
             if not c.isspace() and not unicodedata.category(c).startswith("C")
         )
         if kept:

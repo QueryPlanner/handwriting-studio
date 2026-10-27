@@ -183,6 +183,10 @@ def create_app(settings: Settings | None = None, locate: Locator | None = None) 
         auto_generate: Annotated[
             bool, Form(description="Explicitly accept inferred character labels.")
         ] = False,
+        allow_partial: Annotated[
+            bool,
+            Form(description="With auto_generate, build from the characters found."),
+        ] = False,
     ):
         ensure_storage_capacity()
         if not re.fullmatch(r"[\w .-]{1,60}", name, flags=re.UNICODE) or not name.strip():
@@ -226,6 +230,7 @@ def create_app(settings: Settings | None = None, locate: Locator | None = None) 
                     "ink_mode": ink_mode,
                     "detector": detector,
                     "auto_generate": auto_generate,
+                    "allow_partial": allow_partial,
                 },
                 settings.max_pending_jobs,
             )

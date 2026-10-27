@@ -152,6 +152,11 @@ def test_text_is_composed_so_one_character_is_one_label():
     assert parse_rows(answer("e\u0301")) == ["é"]
 
 
+def test_parse_rows_restores_plain_punctuation_the_model_swapped_for_look_alikes():
+    # Minus, en dash and curly quotes are what a model writes for a drawn hyphen or quote.
+    assert parse_rows(answer("a\u2212\u2013b\u2019\u201c")) == ["a--b'\""]
+
+
 @pytest.mark.parametrize(
     "response",
     [{}, {"choices": []}, {"choices": [{"message": {"content": None}}]}, {"choices": [{}]}],
@@ -460,3 +465,26 @@ def test_unknown_detector_is_rejected(client, sheet):
         "/api/fonts", files={"image": ("s.png", sheet[0])}, data={"detector": "magic"}
     )
     assert response.status_code == 422
+
+
+def test_partial_generation_builds_from_the_characters_that_were_found(tmp_path, sheet):
+    with vision_client(tmp_path, reads(["oiAVlm"])) as client:
+        job = post_sheet(
+            client, sheet, detector="vision", auto_generate="true", allow_partial="true"
+        )
+        assert job["status"] == "ready" and job["mapping_errors"]
+        supported = set(job["supported_characters"])
+        assert set("oiAVlm") <= supported and not set("g.") & supported
+
+
+def test_partial_generation_still_stops_when_nothing_was_found(tmp_path):
+    blank = io.BytesIO()
+    Image.new("RGB", (200, 200), "white").save(blank, format="PNG")
+    with vision_client(tmp_path, reads(["abc"])) as client:
+        response = client.post(
+            "/api/fonts",
+            files={"image": ("blank.png", blank.getvalue())},
+            data={"auto_generate": "true", "allow_partial": "true"},
+        )
+        job = wait_job(client, response.json()["id"])
+        assert job["status"] == "review_required" and job["glyphs"] == []

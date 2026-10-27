@@ -67,7 +67,12 @@ class Worker:
                     job["options"].get("detector", "layout"),
                     self.locate,
                 )
-                if job["options"]["auto_generate"] and not result["mapping_errors"]:
+                options = job["options"]
+                # A partial font beats none when the caller asked for one-shot generation.
+                complete = not result["mapping_errors"] or (
+                    options.get("allow_partial") and result["glyphs"]
+                )
+                if options["auto_generate"] and complete:
                     self.store.finish(job["id"], "queued", "generate", result)
                 else:
                     self.store.finish(job["id"], "review_required", "generate", result)

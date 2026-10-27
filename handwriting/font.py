@@ -16,18 +16,7 @@ from fontTools.ttLib.tables._k_e_r_n import KernTable_format_0
 from PIL import Image, ImageDraw, ImageFont
 
 from handwriting.imaging import ImageError, ink_mask, tight_crop
-from handwriting.models import GlyphBox, PreviewRequest
-
-ALIASES = {
-    "\u00a0": " ",
-    "\u2018": "'",
-    "\u2019": "'",
-    "\u201c": '"',
-    "\u201d": '"',
-    "\u2010": "-",
-    "\u2011": "-",
-    "\u2212": "-",
-}
+from handwriting.models import ALIASES, GlyphBox, PreviewRequest
 
 
 def placement(character: str) -> tuple[int, int]:
