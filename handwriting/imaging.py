@@ -21,8 +21,11 @@ def decode_image(data: bytes, settings: Settings) -> Image.Image:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(data)) as source:
-                if source.format not in {"PNG", "JPEG", "WEBP"}:
+                if source.format not in {"PNG", "JPEG", "MPO", "WEBP"}:
                     raise ImageError("Use a JPEG, PNG, or WebP image.")
+                # Some camera JPEGs carry an auxiliary gain/depth frame. Trace
+                # the primary photograph instead of rejecting its MPO label.
+                source.seek(0)
                 if source.width * source.height > settings.max_image_pixels:
                     raise ImageError("The decoded image exceeds the 20 megapixel limit.")
                 if source.width < 32 or source.height < 32:

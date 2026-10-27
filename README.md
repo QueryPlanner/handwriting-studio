@@ -118,7 +118,7 @@ Configure allowed frontend origins through `CORS_ORIGINS`. The default is `http:
 
 ## Conversion process and limits
 
-1. Validate actual image bytes, correct EXIF rotation, flatten transparency onto white, and resize to at most 2,400 pixels per side. The upload limit is 15 MiB and the decoded limit is 20 megapixels. JPEG, PNG, and WebP are supported.
+1. Validate actual image bytes, correct EXIF rotation, flatten transparency onto white, and resize to at most 2,400 pixels per side. The upload limit is 15 MiB and the decoded limit is 20 megapixels. JPEG, PNG, and WebP are supported. Multi-picture camera JPEGs identified as MPO use their primary photograph; auxiliary gain or depth frames are ignored.
 2. Separate blue ink by color. In automatic mode, include strong dark strokes under shadows. Dark mode uses local contrast. Remove tiny isolated marks. Apply page-background heuristics only when proposing crops, so reviewed edge crops retain their ink.
 3. Estimate row slope, group disconnected marks, and assign the supplied labels in reading order. Return count errors for correction.
 4. Preserve crop aspect ratio. Estimate lowercase height, capitals, ascenders, descenders, and punctuation placement from the label. Overrides allow corrections.
@@ -157,7 +157,7 @@ The script uses the synthetic `examples/reference.png` and `examples/glyphs.json
 
 Tests verify loadable TTF and WOFF2 artifacts, contour holes, detached dots, character mappings, aliases, spacing, crop revisions, invalid inputs, preview bounds, CORS, resource limits, atomic claims, interrupted jobs, persistence, and failed artifact publication. Public tests use synthetic fixtures. Private-photo acceptance checks can run locally without publishing the photo.
 
-The verified local run passed 68 tests with 100% statement and branch coverage across `handwriting/`. Ruff checks, formatting checks, JavaScript syntax checks, and source and wheel builds passed. A separate check with an installed HarfBuzz engine verified that all 3,844 ASCII letter and digit pairs apply kerning exactly once for a private acceptance sample. HarfBuzz is not a runtime dependency of this service.
+The verified local run passed 69 tests with 100% statement and branch coverage across `handwriting/`. Ruff checks, formatting checks, JavaScript syntax checks, and source and wheel builds passed. A separate check with an installed HarfBuzz engine verified that all 3,844 ASCII letter and digit pairs apply kerning exactly once for a private acceptance sample. HarfBuzz is not a runtime dependency of this service.
 
 The private acceptance sample produced 82 distinct handwritten glyphs and 91 character mappings including space and aliases. A separate 2,000-pixel render of every letter and digit pair measured a minimum horizontal clearance of 55 font units. The automated regression checks clearance from the exported font at 1,000 pixels.
 

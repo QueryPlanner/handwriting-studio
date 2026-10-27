@@ -127,6 +127,26 @@ def test_invalid_upload_is_rejected_even_with_image_mime(client, data):
     assert response.status_code == 422
 
 
+def test_multi_picture_jpeg_upload_uses_the_primary_image(client, sheet):
+    primary = Image.open(io.BytesIO(sheet[0]))
+    auxiliary = Image.new("RGB", primary.size, (255, 0, 0))
+    data = io.BytesIO()
+    primary.save(data, format="MPO", save_all=True, append_images=[auxiliary], quality=95)
+    with Image.open(io.BytesIO(data.getvalue())) as image:
+        assert image.format == "MPO" and image.n_frames == 2
+    response = client.post(
+        "/api/fonts",
+        files={"image": ("camera.JPG", data.getvalue(), "image/jpeg")},
+        data={"glyphs": json.dumps(sheet[1]), "auto_generate": "true"},
+    )
+    assert response.status_code == 202, response.text
+    job = wait_job(client, response.json()["id"])
+    assert job["status"] == "ready", job
+    normalized = Image.open(io.BytesIO(client.get(job["image_url"]).content))
+    assert normalized.getpixel((1000, 400)) == (255, 255, 255)
+    assert client.get(job["artifacts"]["font.ttf"]).status_code == 200
+
+
 def test_size_pixel_format_and_chunked_limits(tmp_path, sheet):
     settings = Settings(data_dir=tmp_path, max_upload_bytes=5000, max_image_pixels=10000)
     with TestClient(create_app(settings)) as client:
