@@ -2,7 +2,7 @@
 
 A Python FastAPI service that turns photographs of separately written characters into TTF and WOFF2 fonts. SQLite stores jobs, mappings, revisions, warnings, and conversion results. Font files and normalized source images live in a local data directory.
 
-The included browser studio uploads a page, displays proposed letter crops, lets users correct labels and boxes, and previews the generated WOFF2 font. The frontend can run on Vercel while the API and SQLite storage run on a persistent Docker server. All studio assets are included, including daisyUI. No external AI service receives the image.
+The included browser studio is one step: choose a photo and it reads the letters, builds the font, and offers a try-it box and downloads. The frontend can run on Vercel while the API and SQLite storage run on a persistent Docker server. All studio assets are included and self-hosted: the Lord Handwriting font for headings, and Noto Sans for interface text.
 
 ## Run locally
 
@@ -20,7 +20,7 @@ Open <http://127.0.0.1:8000> for the studio. Open <http://127.0.0.1:8000/docs> f
 
 ## Input contract
 
-Each character must be written separately. Connected cursive paragraphs require transcription and segmentation that this service does not provide. Use plain, neutral or warm paper, blue or black ink, clear lighting, and margins around the page. Perspective, page curvature, touching letters, background patterns, and bleed-through can require crop corrections.
+Each character must be written separately. Connected cursive paragraphs require transcription and segmentation that this service does not provide. Use plain or ruled neutral or warm paper, blue or black ink, clear lighting, and margins around the page. Perspective, page curvature, touching letters, background patterns, and bleed-through can require crop corrections.
 
 The default row order is:
 
@@ -58,7 +58,24 @@ For reliable automation, supply reviewed crop boxes. `examples/reference.png` is
 | `POST /api/fonts/{id}/preview` | PNG preview of supplied text |
 | `GET /api/fonts/{id}/preview` | PNG preview through query parameters |
 
-Uploads accept `image`, `name`, `rows`, `glyphs`, `ink_mode`, and `auto_generate`. `rows` and `glyphs` are JSON strings inside multipart form data. `ink_mode` accepts `auto`, `blue`, or `dark`. Names accept letters, numbers, spaces, dots, and hyphens.
+Uploads accept `image`, `name`, `rows`, `glyphs`, `ink_mode`, `detector`, `auto_generate`, and `allow_partial`. With `auto_generate`, `allow_partial=true` builds the font from the characters that were found even when some marks could not be matched; the job's `mapping_errors` still lists them. A job with no usable characters still stops at `review_required`. The studio sets both. `rows` and `glyphs` are JSON strings inside multipart form data. `ink_mode` accepts `auto`, `blue`, or `dark`. Names accept letters, numbers, spaces, dots, and hyphens.
+
+### AI character detection
+
+Row order only works when the sheet matches the supplied rows. With `OPENROUTER_API_KEY` set, the service asks a vision model (default `openai/gpt-6-luna` on OpenRouter) to read the characters on the page, so extra letters and different layouts work. `detector` accepts `auto` (AI when configured, otherwise row order, and row order if the service fails), `vision` (AI only; the job fails if it is unavailable), or `layout`.
+
+The model only transcribes: one line of text per row of writing, with no coordinates, so the answer is a few hundred tokens and detection takes about 10 seconds. The shapes come from the ink itself. Rows of marks found on the page are paired with the transcribed rows, and a small dynamic program pairs characters with marks in order, skipping stray marks and merging split glyphs such as a colon. Any disagreement between the transcription and the ink (a different number of rows or of marks in a row) is reported as a mapping error, which blocks automatic generation and triggers one retry at a higher reasoning effort. Review every crop before generating.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | unset | Enables AI detection. Read from the environment only and never logged. |
+| `VISION_MODEL` | `openai/gpt-6-luna` | An OpenRouter vision model. It must accept images and may reason. |
+| `VISION_REASONING_EFFORT` | `low` | Reasoning effort of the first attempt. |
+| `VISION_RETRY_EFFORT` | `medium` | Reasoning effort of the single retry. |
+
+Measured on two real sheets: `openai/gpt-6-luna` at low effort answered in 7 to 11 seconds and was exact in 5 of 6 runs; the miss dropped a whole row, which the row-count check reports and retries. `z-ai/glm-5.3-flash` answers in 2 to 4 seconds at low effort but drops characters that differ from the default template. `openai/gpt-oss-120b` cannot be used because it does not accept images.
+
+A detection costs a fraction of a cent. Photos are sent to OpenRouter with `data_collection: deny`, which restricts routing to providers that do not store or train on them. Tell your users when you enable this.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/fonts \
@@ -118,8 +135,8 @@ Configure allowed frontend origins through `CORS_ORIGINS`. The default is `http:
 
 ## Conversion process and limits
 
-1. Validate actual image bytes, correct EXIF rotation, flatten transparency onto white, and resize to at most 2,400 pixels per side. The upload limit is 15 MiB and the decoded limit is 20 megapixels. JPEG, PNG, and WebP are supported. Multi-picture camera JPEGs identified as MPO use their primary photograph; auxiliary gain or depth frames are ignored.
-2. Separate blue ink by color. In automatic mode, include strong dark strokes under shadows. Dark mode uses local contrast. Remove tiny isolated marks. Apply page-background heuristics only when proposing crops, so reviewed edge crops retain their ink.
+1. Validate actual image bytes, correct EXIF rotation, flatten transparency onto white, and resize to at most 2,400 pixels per side. The upload limit is 15 MiB and the decoded limit is 64 megapixels for JPEG (decoded at reduced scale) and 20 megapixels for PNG and WebP. JPEG, PNG, and WebP are supported. Multi-picture camera JPEGs identified as MPO use their primary photograph; auxiliary gain or depth frames are ignored.
+2. Separate blue ink by color. In automatic mode, include strong dark strokes under shadows. Dark mode uses local contrast. Erase long, nearly horizontal ruled lines, then restore blue-shifted ink and strokes that cross them. Remove tiny isolated marks. Apply page-background heuristics only when proposing crops, so reviewed edge crops retain their ink.
 3. Estimate row slope, group disconnected marks, and assign the supplied labels in reading order. Return count errors for correction.
 4. Preserve crop aspect ratio. Estimate lowercase height, capitals, ascenders, descenders, and punctuation placement from the label. Overrides allow corrections.
 5. Smooth the raster, estimate stroke thickness along a morphological skeleton, and limit changes to the main connected stroke. Preserve smaller detached marks. Reject weight adjustments that change connected-component or hole counts. Edge offsets are capped at 16 font units. This conservative approximation does not reproduce a professional type designer's optical corrections.
@@ -144,7 +161,7 @@ ruff check handwriting tests examples
 ruff format --check handwriting tests examples
 coverage run -m pytest -q
 coverage report -m --fail-under=100
-node --check handwriting/static/studio.js
+node --check handwriting/static/studio.js && node --check handwriting/static/theme.js
 ```
 
 With the API running, exercise the supplied photo through HTTP and download the results:
@@ -186,4 +203,4 @@ The installed Starlette test client emits one deprecation warning about HTTPX. H
 - [OpenCV contour hierarchy](https://docs.opencv.org/4.x/d9/d8b/tutorial_py_contours_hierarchy.html)
 - [Pillow font rendering](https://pillow.readthedocs.io/en/stable/reference/ImageFont.html)
 
-daisyUI 5.5.19 is vendored under its MIT license in `handwriting/static/daisyui-LICENSE.txt`.
+Noto Sans is vendored under the SIL Open Font License in `handwriting/static/fonts/NotoSans-OFL.txt`.

@@ -17,6 +17,20 @@ DEFAULT_ROWS = [
     "/@#&+=%₹",
 ]
 
+# Characters that share the glyph of a plain one, so typing them still works in the font.
+ALIASES = {
+    "\u00a0": " ",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2212": "-",
+}
+# A vision model may answer with a typographic look-alike of what the writer drew.
+LOOKALIKES = str.maketrans(ALIASES | {"\u2012": "-", "\u2013": "-", "\u2014": "-"})
+
 
 class GlyphBox(BaseModel):
     model_config = ConfigDict(extra="forbid")

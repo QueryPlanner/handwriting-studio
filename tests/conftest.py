@@ -10,6 +10,13 @@ from handwriting.api import create_app
 from handwriting.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def no_live_vision(monkeypatch):
+    """A developer's exported key must never send test images to a paid service."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("VISION_MODEL", raising=False)
+
+
 @pytest.fixture
 def sheet():
     """Distinct geometric ink, including a hole, a dot, a descender and thin strokes."""

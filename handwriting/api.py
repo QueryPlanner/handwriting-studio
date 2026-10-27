@@ -19,7 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from handwriting.config import Settings
 from handwriting.font import preview_bytes
-from handwriting.imaging import ImageError, decode_image, ink_mask
+from handwriting.imaging import ImageError, Locator, decode_image, ink_mask
 from handwriting.models import (
     DEFAULT_ROWS,
     GenerateRequest,
@@ -29,6 +29,7 @@ from handwriting.models import (
     validate_rows,
 )
 from handwriting.store import QueueFull, Store
+from handwriting.vision import VisionLocator
 from handwriting.worker import Worker
 
 STATIC = Path(__file__).parent / "static"
@@ -77,10 +78,12 @@ class UploadLimit:
         await self.app(scope, bounded_receive, send)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, locate: Locator | None = None) -> FastAPI:
     settings = settings or Settings()
+    if locate is None and settings.openrouter_api_key:
+        locate = VisionLocator(settings)
     store = Store(settings.database)
-    worker = Worker(store, settings.data_dir)
+    worker = Worker(store, settings.data_dir, locate)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -160,6 +163,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "coordinates": "normalized, EXIF-corrected image",
             "ink_modes": ["auto", "blue", "dark"],
             "max_glyphs": 160,
+            "detectors": ["auto", "vision", "layout"],
+            "ai_detection": locate is not None,
         }
 
     @app.post("/api/fonts", status_code=202)
@@ -171,8 +176,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str | None, Form(description="Optional JSON array of labeled crop boxes.")
         ] = None,
         ink_mode: Annotated[Literal["auto", "blue", "dark"], Form()] = "auto",
+        detector: Annotated[
+            Literal["auto", "vision", "layout"],
+            Form(description="How characters are found: a vision model, row order, or either."),
+        ] = "auto",
         auto_generate: Annotated[
             bool, Form(description="Explicitly accept inferred character labels.")
+        ] = False,
+        allow_partial: Annotated[
+            bool,
+            Form(description="With auto_generate, build from the characters found."),
         ] = False,
     ):
         ensure_storage_capacity()
@@ -215,7 +228,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "rows": parsed_rows,
                     "glyphs": parsed_boxes,
                     "ink_mode": ink_mode,
+                    "detector": detector,
                     "auto_generate": auto_generate,
+                    "allow_partial": allow_partial,
                 },
                 settings.max_pending_jobs,
             )

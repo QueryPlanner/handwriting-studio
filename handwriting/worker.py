@@ -9,15 +9,15 @@ import uuid
 from pathlib import Path
 
 from handwriting.font import build_font
-from handwriting.imaging import ImageError, analyze
+from handwriting.imaging import ImageError, Locator, analyze
 from handwriting.store import Store
 
 logger = logging.getLogger(__name__)
 
 
 class Worker:
-    def __init__(self, store: Store, data_dir: Path):
-        self.store, self.data_dir = store, data_dir
+    def __init__(self, store: Store, data_dir: Path, locate: Locator | None = None):
+        self.store, self.data_dir, self.locate = store, data_dir, locate
         self.stop_event = threading.Event()
         self.wake = threading.Event()
         self.thread = threading.Thread(target=self.run, name="font-converter", daemon=True)
@@ -64,8 +64,15 @@ class Worker:
                     job["options"]["rows"],
                     job["options"]["ink_mode"],
                     job["options"].get("glyphs"),
+                    job["options"].get("detector", "layout"),
+                    self.locate,
                 )
-                if job["options"]["auto_generate"] and not result["mapping_errors"]:
+                options = job["options"]
+                # A partial font beats none when the caller asked for one-shot generation.
+                complete = not result["mapping_errors"] or (
+                    options.get("allow_partial") and result["glyphs"]
+                )
+                if options["auto_generate"] and complete:
                     self.store.finish(job["id"], "queued", "generate", result)
                 else:
                     self.store.finish(job["id"], "review_required", "generate", result)

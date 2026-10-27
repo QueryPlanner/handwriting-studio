@@ -272,3 +272,42 @@ def test_weight_offset_preserves_a_small_enclosed_counter():
     assert balanced[30, 30] == 0
     assert np.count_nonzero(balanced) > 0
     assert topology(np.zeros((10, 10), dtype=np.uint8)) == (0, 0)
+
+
+def _jpeg(size):
+    output = io.BytesIO()
+    Image.new("RGB", size, (250, 250, 245)).save(output, format="JPEG")
+    return output.getvalue()
+
+
+def test_large_camera_jpeg_decodes_at_reduced_scale():
+    settings = Settings(max_image_pixels=10_000, max_jpeg_pixels=400_000, max_image_side=200)
+    # 600x400 is over the PNG limit but under the JPEG limit; draft decoding shrinks it.
+    image = decode_image(_jpeg((600, 400)), settings)
+    assert max(image.size) <= 300
+    assert image.size[0] / image.size[1] == pytest.approx(1.5, abs=0.02)
+
+
+def test_jpeg_above_its_own_limit_is_rejected_with_that_limit():
+    settings = Settings(max_image_pixels=1_000_000, max_jpeg_pixels=40_000)
+    with pytest.raises(ImageError, match="0.04 megapixel"):
+        decode_image(_jpeg((300, 200)), settings)
+
+
+def test_inference_ignores_page_edges_while_reviewed_crops_keep_their_ink():
+    image = Image.new("RGB", (400, 400), (235, 228, 210))
+    draw = ImageDraw.Draw(image)
+    ink = (20, 20, 110)
+    draw.line((300, 300, 340, 350), fill=ink, width=6)  # a real, thin pen stroke
+    draw.rectangle((2, 150, 12, 190), fill=ink)  # touches the left margin
+    draw.rectangle((388, 150, 398, 190), fill=ink)  # touches the right margin
+    draw.rectangle((200, 0, 230, 10), fill=ink)  # touches the top edge
+    draw.rectangle((200, 390, 230, 399), fill=ink)  # touches the bottom edge
+    draw.rectangle((30, 30, 250, 250), fill=ink)  # a blob over a quarter of the page
+    reviewed, _ = ink_mask(image, "blue")
+    proposed, _ = ink_mask(image, "blue", for_inference=True)
+    for point in [(210, 5), (210, 395), (7, 170), (393, 170)]:  # (x, y)
+        assert reviewed[point[1], point[0]] == 255, point
+        assert proposed[point[1], point[0]] == 0, point
+    assert proposed[325, 320] == 255
+    assert reviewed[100, 100] == 255 and proposed[100, 100] == 0  # too large to be a letter
