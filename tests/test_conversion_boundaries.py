@@ -310,4 +310,6 @@ def test_inference_ignores_page_edges_while_reviewed_crops_keep_their_ink():
         assert reviewed[point[1], point[0]] == 255, point
         assert proposed[point[1], point[0]] == 0, point
     assert proposed[325, 320] == 255
-    assert reviewed[100, 100] == 255 and proposed[100, 100] == 0  # too large to be a letter
+    # Too large to be a letter. Ink counts only where it is darker than nearby paper, so
+    # check just inside the blob's edge, not its far interior.
+    assert reviewed[40, 40] == 255 and proposed[40, 40] == 0
