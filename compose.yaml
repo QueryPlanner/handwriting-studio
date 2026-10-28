@@ -14,6 +14,8 @@ services:
       DATA_DIR: /data
       MAX_DATA_BYTES: "1073741824"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Set in the server's shell or an untracked .env file. Blank turns AI detection off.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     cpus: 1.0
     mem_limit: 1g
     pids_limit: 128

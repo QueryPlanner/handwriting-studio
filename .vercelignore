@@ -7,4 +7,6 @@
 !handwriting/static/index.html
 !handwriting/static/studio.js
 !handwriting/static/studio.css
-!handwriting/static/daisyui.css
+!handwriting/static/theme.js
+!handwriting/static/fonts/
+!handwriting/static/fonts/*
