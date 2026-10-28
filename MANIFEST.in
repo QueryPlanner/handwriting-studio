@@ -5,3 +5,7 @@ include examples/glyphs.json
 include examples/run_sample.py
 include examples/make_reference.py
 recursive-include tests *.py
+exclude examples/handwriting.jpg
+exclude examples/browser-preview.jpg
+prune examples/generated
+prune data

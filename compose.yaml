@@ -30,6 +30,12 @@ services:
   gateway:
     image: nginx:1.28-alpine
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     ports:
       - 127.0.0.1:8090:8080
     volumes:
