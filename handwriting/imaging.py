@@ -57,6 +57,10 @@ def decode_image(data: bytes, settings: Settings) -> Image.Image:
 
 LINE_STEP = 4
 LINE_BAND = 4
+RULE_DOWNSCALE_THRESHOLD = 80
+RULE_VOTE_RATIO = 0.12
+SHADOWED_BLUE_MAX_NORMALIZED = 155
+SHADOWED_BLUE_MAX_GRAY = 60
 
 
 def _line_reach(
@@ -89,10 +93,10 @@ def remove_ruled_lines(mask: np.ndarray, rgb: np.ndarray) -> np.ndarray:
     scale = min(1.0, 1200 / max(height, width))
     small = cv2.resize(mask, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     segments = cv2.HoughLinesP(
-        (small > 127).astype(np.uint8) * 255,
+        (small > RULE_DOWNSCALE_THRESHOLD).astype(np.uint8) * 255,
         1,
         np.pi / 720,
-        threshold=int(0.18 * small.shape[1]),
+        threshold=int(RULE_VOTE_RATIO * small.shape[1]),
         minLineLength=int(0.30 * small.shape[1]),
         maxLineGap=int(0.04 * small.shape[1]),
     )
@@ -139,7 +143,11 @@ def ink_mask(
     normalized = cv2.divide(gray, np.maximum(background, 1), scale=255)
     if selected == "blue":
         # Shadow can make blue ink nearly black. Only include strong local contrast.
-        dark_fallback = (normalized < 155) & (gray < 115) if mode == "auto" else False
+        is_auto_mode = mode == "auto"
+        shadowed_blue_pixels = (normalized < SHADOWED_BLUE_MAX_NORMALIZED) & (
+            gray < SHADOWED_BLUE_MAX_GRAY
+        )
+        dark_fallback = shadowed_blue_pixels if is_auto_mode else False
         mask = (blue_pixels | dark_fallback).astype(np.uint8) * 255
     else:
         selected = "dark"

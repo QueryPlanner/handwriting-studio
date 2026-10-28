@@ -68,3 +68,36 @@ def test_line_reach_stops_when_a_tilted_rule_leaves_the_image():
         mask[max(0, 50 - x // 5), x] = 255
     _, y = _line_reach(mask, 10.0, 48.0, -0.2, 1, reach=20)
     assert y < 5
+
+
+def test_gray_dotted_rules_and_margin_line_are_excluded_in_auto_blue_mode():
+    width, height = 1200, 600
+    image = Image.new("RGB", (width, height), (185, 187, 185))
+    draw = ImageDraw.Draw(image)
+    gray_rule = (86, 86, 86)
+    draw.line([(95, 0), (85, height)], fill=gray_rule, width=2)  # vertical margin line
+    for y in (160, 300, 440):
+        for x in range(0, width, 10):
+            draw.line([(x, y), (min(width, x + 5), y)], fill=gray_rule, width=2)
+    draw.line([(300, 120), (300, 200)], fill=BLUE_INK, width=8)
+    mask, selected = ink_mask(image, "auto", for_inference=True)
+    assert selected == "blue"
+    assert not mask[:, 80:105].any(), "gray vertical margin line leaked into blue-ink mask"
+    assert not mask[295:306, :].any(), "gray dotted rule leaked into blue-ink mask"
+    assert mask[130:190, 300].all(), "blue glyph stroke was lost"
+
+
+def test_thin_dotted_rules_on_large_sheet_are_erased_in_dark_mode():
+    width, height = 1560, 800
+    image = Image.new("RGB", (width, height), (214, 206, 190))
+    draw = ImageDraw.Draw(image)
+    for y in (120, 260, 400, 540):
+        for x in range(0, width, 10):
+            y0 = round(y + 6 - 6 * (x / width))
+            y1 = round(y + 6 - 6 * (min(width, x + 4) / width))
+            draw.line([(x, y0), (min(width, x + 4), y1)], fill=(34, 30, 24), width=1)
+    draw.line([(800, 200), (800, 300)], fill=BLACK_INK, width=9)
+    mask, selected = ink_mask(image, "dark")
+    assert selected == "dark"
+    assert not mask[115:135, :].any(), "thin dotted rule survived dark-mode rule removal"
+    assert mask[200:301, 800].all(), "black stroke crossing a dotted rule has a gap"
