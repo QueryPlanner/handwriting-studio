@@ -1,7 +1,7 @@
 """Ruled notebook paper must not leak its lines into traced glyphs."""
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from handwriting.imaging import _line_reach, ink_mask, remove_ruled_lines
 
@@ -101,3 +101,24 @@ def test_thin_dotted_rules_on_large_sheet_are_erased_in_dark_mode():
     assert selected == "dark"
     assert not mask[115:135, :].any(), "thin dotted rule survived dark-mode rule removal"
     assert mask[200:301, 800].all(), "black stroke crossing a dotted rule has a gap"
+
+
+def blue_ring(smear=0):
+    """A thin blue 'o'. With `smear`, its colour bleeds as JPEG chroma subsampling does."""
+    image = Image.new("RGB", (200, 200), (205, 207, 200))
+    ImageDraw.Draw(image).ellipse([86, 86, 114, 114], outline=(10, 20, 110), width=3)
+    if not smear:
+        return image
+    luma, blue_diff, red_diff = image.convert("YCbCr").split()
+    blur = ImageFilter.GaussianBlur(smear)
+    return Image.merge("YCbCr", (luma, blue_diff.filter(blur), red_diff.filter(blur))).convert(
+        "RGB"
+    )
+
+
+def test_blue_bleeding_beside_a_thin_stroke_does_not_thicken_or_fill_it():
+    sharp, _ = ink_mask(blue_ring(), "auto")
+    bled, mode = ink_mask(blue_ring(smear=3), "auto")
+    assert mode == "blue"
+    assert np.count_nonzero(bled) <= 1.1 * np.count_nonzero(sharp), "strokes were thickened"
+    assert not bled[94:107, 94:107].any(), "the inside of the letter was filled with ink"

@@ -61,6 +61,13 @@ RULE_DOWNSCALE_THRESHOLD = 80
 RULE_VOTE_RATIO = 0.12
 SHADOWED_BLUE_MAX_NORMALIZED = 155
 SHADOWED_BLUE_MAX_GRAY = 60
+# Ink pixels must also be clearly darker than the paper around them. JPEG stores colour at
+# lower resolution than brightness, so blue bleeds into the paper beside a thin stroke and
+# fills the inside of letters like a, e and o when colour alone decides. Paper is measured
+# as the brightest nearby pixel, over a window wide enough that a thick stroke cannot
+# mistake its own interior for paper.
+INK_MAX_NORMALIZED = 200
+PAPER_WINDOW = 0.06
 
 
 def _line_reach(
@@ -148,7 +155,11 @@ def ink_mask(
             gray < SHADOWED_BLUE_MAX_GRAY
         )
         dark_fallback = shadowed_blue_pixels if is_auto_mode else False
-        mask = (blue_pixels | dark_fallback).astype(np.uint8) * 255
+        window = max(31, round(PAPER_WINDOW * gray.shape[1])) | 1
+        paper = cv2.GaussianBlur(cv2.dilate(gray, np.ones((window, window), np.uint8)), (0, 0), 21)
+        darker = cv2.divide(gray, np.maximum(paper, 1), scale=255) < INK_MAX_NORMALIZED
+        inked_blue = blue_pixels & darker
+        mask = (inked_blue | dark_fallback).astype(np.uint8) * 255
     else:
         selected = "dark"
         mask = ((normalized < 185) & (gray < 180)).astype(np.uint8) * 255
